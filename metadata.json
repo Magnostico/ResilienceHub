@@ -1,0 +1,6 @@
+{
+  "name": "ResilienceHub",
+  "description": "Sistema civil de gestão de estoque de emergência, sobrevivência familiar offline e pontos de encontro.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,392 @@
+package com.example.ui
+
+import android.app.Application
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.data.AppDatabase
+import com.example.data.entity.FamilyProfileEntity
+import com.example.data.entity.InventoryItemEntity
+import com.example.data.entity.ManualChunkFtsEntity
+import com.example.data.entity.MapPoiEntity
+import com.example.data.model.FamilyRole
+import com.example.data.model.ItemCategory
+import com.example.data.model.PoiType
+import com.example.data.model.StorageLocation
+import com.example.data.repository.ResilienceRepository
+import com.example.domain.RationingAndAlertEngine
+import com.example.services.ExpirationWorker
+import com.example.services.HardwareToolsManager
+import com.example.services.PdfRagManager
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+
+data class MainUiState(
+    val crisisMode: Boolean = false,
+    val items: List<InventoryItemEntity> = emptyList(),
+    val evaluatedItems: List<RationingAndAlertEngine.ItemEvaluationResult> = emptyList(),
+    val waterReport: RationingAndAlertEngine.WaterAutonomyReport? = null,
+    val profiles: List<FamilyProfileEntity> = emptyList(),
+    val pois: List<MapPoiEntity> = emptyList(),
+    val poiNavigationList: List<RationingAndAlertEngine.PoiNavigationInfo> = emptyList(),
+    val manualChunks: List<ManualChunkFtsEntity> = emptyList(),
+    val manualQuery: String = "",
+    val selectedLocation: StorageLocation? = null,
+    val selectedCategory: ItemCategory? = null,
+    val currentLat: Double = -22.9519, // Rio de Janeiro (Botafogo / Copacabana)
+    val currentLon: Double = -43.1850,
+    val isGpsActive: Boolean = false,
+    val gpsProviderInfo: String = "GPS STANDBY",
+    val selectedTab: Int = 0, // 0: Estoque, 1: Água, 2: Pontos, 3: Guia FTS / RAG, 4: Ferramentas Hardware, 5: Família
+
+    // Hardware states
+    val isTorchOn: Boolean = false,
+    val isSosActive: Boolean = false,
+    val isWhistleActive: Boolean = false,
+
+    // RAG states
+    val ragResponse: PdfRagManager.RagResponse? = null,
+    val isRagLoading: Boolean = false,
+    val ragModeAi: Boolean = false,
+    val pdfImportStatus: String? = null
+)
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val database = AppDatabase.getInstance(application)
+    private val repository = ResilienceRepository(database)
+    val engine = RationingAndAlertEngine()
+
+    val hardwareToolsManager = HardwareToolsManager(application)
+    val pdfRagManager = PdfRagManager(application, database)
+
+    private val _crisisMode = MutableStateFlow(false)
+    private val _selectedLocation = MutableStateFlow<StorageLocation?>(null)
+    private val _selectedCategory = MutableStateFlow<ItemCategory?>(null)
+    private val _manualQuery = MutableStateFlow("")
+    private val _currentLat = MutableStateFlow(-22.9519)
+    private val _currentLon = MutableStateFlow(-43.1850)
+    private val _gpsProviderInfo = MutableStateFlow("GPS STANDBY (Economia)")
+    private val _selectedTab = MutableStateFlow(0)
+
+    // RAG Local States
+    private val _ragResponse = MutableStateFlow<PdfRagManager.RagResponse?>(null)
+    private val _isRagLoading = MutableStateFlow(false)
+    private val _ragModeAi = MutableStateFlow(false)
+    private val _pdfImportStatus = MutableStateFlow<String?>(null)
+
+    private val _manualChunks = _manualQuery.flatMapLatest { query ->
+        repository.searchManual(query)
+    }
+
+    init {
+        // Agenda a checagem diária em segundo plano do WorkManager
+        ExpirationWorker.scheduleDailyCheck(application)
+    }
+
+    val uiState: StateFlow<MainUiState> = combine(
+        listOf(
+            repository.allItems,
+            repository.allProfiles,
+            repository.allPois,
+            _manualChunks,
+            _crisisMode,
+            _selectedLocation,
+            _selectedCategory,
+            _manualQuery,
+            _currentLat,
+            _currentLon,
+            hardwareToolsManager.isGpsActive,
+            _gpsProviderInfo,
+            _selectedTab,
+            hardwareToolsManager.isTorchOn,
+            hardwareToolsManager.isSosActive,
+            hardwareToolsManager.isWhistleActive,
+            _ragResponse,
+            _isRagLoading,
+            _ragModeAi,
+            _pdfImportStatus
+        )
+    ) { flowsArray: Array<Any?> ->
+        @Suppress("UNCHECKED_CAST")
+        val allItems = flowsArray[0] as List<InventoryItemEntity>
+        @Suppress("UNCHECKED_CAST")
+        val profiles = flowsArray[1] as List<FamilyProfileEntity>
+        @Suppress("UNCHECKED_CAST")
+        val pois = flowsArray[2] as List<MapPoiEntity>
+        @Suppress("UNCHECKED_CAST")
+        val manualChunks = flowsArray[3] as List<ManualChunkFtsEntity>
+        val crisisMode = flowsArray[4] as Boolean
+        val locationFilter = flowsArray[5] as StorageLocation?
+        val categoryFilter = flowsArray[6] as ItemCategory?
+        val manualQuery = flowsArray[7] as String
+        val lat = flowsArray[8] as Double
+        val lon = flowsArray[9] as Double
+        val isGpsActive = flowsArray[10] as Boolean
+        val gpsProviderInfo = flowsArray[11] as String
+        val tab = flowsArray[12] as Int
+        val isTorchOn = flowsArray[13] as Boolean
+        val isSosActive = flowsArray[14] as Boolean
+        val isWhistleActive = flowsArray[15] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val ragResponse = flowsArray[16] as? PdfRagManager.RagResponse
+        val isRagLoading = flowsArray[17] as Boolean
+        val ragModeAi = flowsArray[18] as Boolean
+        val pdfImportStatus = flowsArray[19] as? String
+
+        // Filtragem do estoque
+        val filteredItems = allItems.filter { item ->
+            (locationFilter == null || item.location == locationFilter) &&
+            (categoryFilter == null || item.category == categoryFilter)
+        }
+
+        // Avaliação FEFO e Manutenção de Bateria
+        val evaluated = filteredItems.map { item ->
+            engine.evaluateItemStatus(item)
+        }
+
+        // Relatório de Autonomia de Água
+        val waterReport = engine.generateWaterReport(allItems, profiles)
+
+        // Navegação Matemática Offline via Haversine para todos os POIs
+        val navList = pois.map { poi ->
+            engine.calculatePoiNavigation(lat, lon, poi)
+        }.sortedBy { it.distanceMeters }
+
+        MainUiState(
+            crisisMode = crisisMode,
+            items = filteredItems,
+            evaluatedItems = evaluated,
+            waterReport = waterReport,
+            profiles = profiles,
+            pois = pois,
+            poiNavigationList = navList,
+            manualChunks = manualChunks,
+            manualQuery = manualQuery,
+            selectedLocation = locationFilter,
+            selectedCategory = categoryFilter,
+            currentLat = lat,
+            currentLon = lon,
+            isGpsActive = isGpsActive,
+            gpsProviderInfo = gpsProviderInfo,
+            selectedTab = tab,
+            isTorchOn = isTorchOn,
+            isSosActive = isSosActive,
+            isWhistleActive = isWhistleActive,
+            ragResponse = ragResponse,
+            isRagLoading = isRagLoading,
+            ragModeAi = ragModeAi,
+            pdfImportStatus = pdfImportStatus
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = MainUiState()
+    )
+
+    fun toggleCrisisMode() {
+        _crisisMode.value = !_crisisMode.value
+    }
+
+    fun setSelectedTab(tab: Int) {
+        _selectedTab.value = tab
+    }
+
+    fun setLocationFilter(location: StorageLocation?) {
+        _selectedLocation.value = location
+    }
+
+    fun setCategoryFilter(category: ItemCategory?) {
+        _selectedCategory.value = category
+    }
+
+    fun setManualQuery(query: String) {
+        _manualQuery.value = query
+    }
+
+    fun setRagModeAi(enabled: Boolean) {
+        _ragModeAi.value = enabled
+    }
+
+    // --- Hardware Tools Controls ---
+
+    fun toggleTorch() {
+        hardwareToolsManager.toggleTorch()
+    }
+
+    fun toggleSosMorse() {
+        if (hardwareToolsManager.isSosActive.value) {
+            hardwareToolsManager.stopSosMorse()
+        } else {
+            hardwareToolsManager.startSosMorse()
+        }
+    }
+
+    fun toggleWhistle() {
+        if (hardwareToolsManager.isWhistleActive.value) {
+            hardwareToolsManager.stopWhistle()
+        } else {
+            hardwareToolsManager.startWhistle(isPulseMode = true)
+        }
+    }
+
+    /**
+     * GPS Pulso On-Demand: liga o hardware, busca coordenada com timeout de 8s e desliga imediatamente.
+     */
+    fun triggerSingleShotGpsPulse() {
+        viewModelScope.launch {
+            _gpsProviderInfo.value = "BUSCANDO FIX SATÉLITE (Timeout 8s)..."
+            val result = hardwareToolsManager.requestSingleShotLocation()
+            if (result.location != null) {
+                _currentLat.value = result.location.latitude
+                _currentLon.value = result.location.longitude
+                _gpsProviderInfo.value = "FIX OBTIDO (${result.providerUsed}) em ${result.durationMs}ms • GPS DESLIGADO"
+            } else {
+                _gpsProviderInfo.value = "TIMEOUT GPS (8s) • GPS DESLIGADO PARA SALVAR BATERIA"
+            }
+        }
+    }
+
+    fun triggerImmediateExpirationCheck() {
+        ExpirationWorker.runImmediateCheck(getApplication())
+    }
+
+    // --- PDF RAG Operations ---
+
+    fun importPdfFromUri(uri: Uri) {
+        viewModelScope.launch {
+            _pdfImportStatus.value = "Importando e extraindo páginas do PDF..."
+            val result = pdfRagManager.ingestPdf(uri)
+            if (result.isSuccess) {
+                _pdfImportStatus.value = "✓ \"${result.docTitle}\" importado: ${result.totalPages} páginas, ${result.chunksGenerated} blocos FTS4 indexados!"
+            } else {
+                _pdfImportStatus.value = "❌ Falha ao importar PDF: ${result.errorMessage}"
+            }
+        }
+    }
+
+    fun askRagQuestion(question: String) {
+        viewModelScope.launch {
+            if (question.isBlank()) return@launch
+            _isRagLoading.value = true
+            val response = pdfRagManager.searchLocalAiRag(question)
+            _ragResponse.value = response
+            _isRagLoading.value = false
+        }
+    }
+
+    // --- Inventory, Profiles, POI Mutations ---
+
+    fun updateItemQuantity(itemId: Long, delta: Double) {
+        viewModelScope.launch {
+            val item = uiState.value.items.find { it.id == itemId } ?: return@launch
+            val newQty = (item.quantity + delta).coerceAtLeast(0.0)
+            repository.updateQuantity(itemId, newQty)
+        }
+    }
+
+    fun registerBatteryMaintenance(itemId: Long) {
+        viewModelScope.launch {
+            repository.registerMaintenance(itemId, System.currentTimeMillis())
+        }
+    }
+
+    /**
+     * Girar/Renovar Item: retira o lote prestes a vencer para consumo da casa
+     * e registra a reposição com novo prazo de validade (padrão 180 dias).
+     */
+    fun rotateItem(itemId: Long, extendDays: Int = 180) {
+        viewModelScope.launch {
+            val item = uiState.value.items.find { it.id == itemId } ?: return@launch
+            val newExp = System.currentTimeMillis() + (extendDays.toLong() * 24 * 3600 * 1000)
+            val updated = item.copy(expirationDate = newExp)
+            repository.updateItem(updated)
+        }
+    }
+
+    fun addNewItem(
+        name: String,
+        category: ItemCategory,
+        location: StorageLocation,
+        quantity: Double,
+        unit: String,
+        expirationDays: Int?
+    ) {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val expDate = expirationDays?.let { now + (it.toLong() * 24 * 3600 * 1000) }
+            val lastMaint = if (category == ItemCategory.ENERGY_GEAR) now else null
+
+            repository.insertItem(
+                InventoryItemEntity(
+                    name = name,
+                    category = category,
+                    location = location,
+                    quantity = quantity,
+                    unit = unit,
+                    expirationDate = expDate,
+                    lastMaintenanceDate = lastMaint,
+                    alertDaysBefore = 90
+                )
+            )
+        }
+    }
+
+    fun addNewProfile(
+        name: String,
+        role: FamilyRole,
+        weightKg: Double,
+        bloodType: String,
+        allergies: String,
+        medications: String
+    ) {
+        viewModelScope.launch {
+            repository.insertProfile(
+                FamilyProfileEntity(
+                    name = name,
+                    role = role,
+                    weightKg = weightKg,
+                    bloodType = bloodType,
+                    allergies = allergies,
+                    medications = medications
+                )
+            )
+        }
+    }
+
+    fun addNewPoi(
+        title: String,
+        type: PoiType,
+        latitude: Double,
+        longitude: Double,
+        address: String,
+        phone: String?
+    ) {
+        viewModelScope.launch {
+            repository.insertPoi(
+                MapPoiEntity(
+                    title = title,
+                    type = type,
+                    latitude = latitude,
+                    longitude = longitude,
+                    address = address,
+                    phone = phone
+                )
+            )
+        }
+    }
+
+    fun triggerSingleShotGps(lat: Double = -22.9519, lon: Double = -43.1850) {
+        triggerSingleShotGpsPulse()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        hardwareToolsManager.releaseAll()
+    }
+}
