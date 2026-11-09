@@ -4,12 +4,16 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.model.FamilyRole
 import com.example.data.model.ItemCategory
 import com.example.data.model.PoiType
@@ -19,9 +23,11 @@ import com.example.data.model.StorageLocation
 @Composable
 fun AddItemDialog(
     onDismiss: () -> Unit,
-    onConfirm: (name: String, category: ItemCategory, location: StorageLocation, quantity: Double, unit: String, expirationDays: Int?) -> Unit
+    onConfirm: (name: String, barcode: String?, category: ItemCategory, location: StorageLocation, quantity: Double, unit: String, expirationDays: Int?) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
+    var barcode by remember { mutableStateOf("") }
+    var showBarcodeScanner by remember { mutableStateOf(false) }
     var selectedCategory by remember { mutableStateOf(ItemCategory.WATER) }
     var selectedLocation by remember { mutableStateOf(StorageLocation.APARTMENT) }
     var quantityText by remember { mutableStateOf("1.0") }
@@ -45,6 +51,40 @@ fun AddItemDialog(
                         .fillMaxWidth()
                         .testTag("input_item_name")
                 )
+
+                // Código de barras com botão de escaneamento por câmera
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = barcode,
+                        onValueChange = { barcode = it },
+                        label = { Text("Código de Barras (EAN-13)") },
+                        leadingIcon = {
+                            Icon(Icons.Default.QrCodeScanner, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("input_item_barcode")
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    FilledTonalButton(
+                        onClick = { showBarcodeScanner = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("btn_scan_barcode_form")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.QrCodeScanner,
+                            contentDescription = "Escanear Código de Barras",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Escanear", fontSize = 11.sp)
+                    }
+                }
 
                 // Location selector
                 Text("Local de Armazenamento:", style = MaterialTheme.typography.labelMedium)
@@ -105,7 +145,7 @@ fun AddItemDialog(
                     if (name.isNotBlank()) {
                         val qty = quantityText.toDoubleOrNull() ?: 1.0
                         val expDays = expirationDaysText.toIntOrNull()
-                        onConfirm(name, selectedCategory, selectedLocation, qty, unitText, expDays)
+                        onConfirm(name, barcode.ifBlank { null }, selectedCategory, selectedLocation, qty, unitText, expDays)
                         onDismiss()
                     }
                 },
@@ -120,6 +160,15 @@ fun AddItemDialog(
             }
         }
     )
+
+    if (showBarcodeScanner) {
+        BarcodeScannerModal(
+            onDismiss = { showBarcodeScanner = false },
+            onBarcodeScanned = { scannedCode ->
+                barcode = scannedCode
+            }
+        )
+    }
 }
 
 @Composable

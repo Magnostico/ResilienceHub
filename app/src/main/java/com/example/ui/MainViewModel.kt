@@ -315,7 +315,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         location: StorageLocation,
         quantity: Double,
         unit: String,
-        expirationDays: Int?
+        expirationDays: Int?,
+        barcode: String? = null
     ) {
         viewModelScope.launch {
             val now = System.currentTimeMillis()
@@ -325,6 +326,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.insertItem(
                 InventoryItemEntity(
                     name = name,
+                    barcode = barcode?.ifBlank { null },
                     category = category,
                     location = location,
                     quantity = quantity,

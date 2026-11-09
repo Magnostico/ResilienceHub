@@ -39,6 +39,19 @@ fun InventoryScreen(
     val crisisMode = state.crisisMode
     val report = state.waterReport
 
+    var showBarcodeScannerModal by remember { mutableStateOf(false) }
+    var activeBarcodeFilter by remember { mutableStateOf<String?>(null) }
+
+    val displayedItems = remember(state.evaluatedItems, activeBarcodeFilter) {
+        if (activeBarcodeFilter.isNullOrBlank()) {
+            state.evaluatedItems
+        } else {
+            state.evaluatedItems.filter { eval ->
+                eval.item.barcode != null && eval.item.barcode.contains(activeBarcodeFilter!!.trim())
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -119,7 +132,55 @@ fun InventoryScreen(
             }
         }
 
-        // --- 2. FAIXA DE ALERTAS DE VENCIMENTO / BATERIA ---
+        // --- 2. BARRA DE AÇÃO: BOTÃO LEITOR DE CÓDIGO DE BARRAS & STATUS ---
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+        ) {
+            FilledTonalButton(
+                onClick = { showBarcodeScannerModal = true },
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = if (crisisMode) Color(0xFF1E293B) else MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = if (crisisMode) Color(0xFF38BDF8) else MaterialTheme.colorScheme.onPrimaryContainer
+                ),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                modifier = Modifier.testTag("btn_scan_barcode_inventory")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.QrCodeScanner,
+                    contentDescription = "Escanear Código de Barras",
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Escanear Código de Barras",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            if (activeBarcodeFilter != null) {
+                InputChip(
+                    selected = true,
+                    onClick = { activeBarcodeFilter = null },
+                    label = { Text("EAN: $activeBarcodeFilter", fontSize = 11.sp) },
+                    trailingIcon = {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Limpar Filtro",
+                            modifier = Modifier.size(14.dp)
+                        )
+                    },
+                    modifier = Modifier.testTag("chip_active_barcode_filter")
+                )
+            }
+        }
+
+        // --- 3. FAIXA DE ALERTAS DE VENCIMENTO / BATERIA ---
         val alertCount = state.evaluatedItems.count { it.status != ItemAlertStatus.OK }
         if (alertCount > 0) {
             Surface(
@@ -128,7 +189,7 @@ fun InventoryScreen(
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444)),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 8.dp)
+                    .padding(bottom = 6.dp)
                     .testTag("inventory_alert_banner")
             ) {
                 Row(
@@ -159,7 +220,7 @@ fun InventoryScreen(
             }
         }
 
-        // --- 3. FILTROS RÁPIDOS (LOCAL E CATEGORIA) ---
+        // --- 4. FILTROS RÁPIDOS (LOCAL E CATEGORIA) ---
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier.padding(bottom = 8.dp)
@@ -191,18 +252,26 @@ fun InventoryScreen(
             }
         }
 
-        // --- 4. LISTA DE ITENS COM BOTÕES DE AÇÃO ---
-        if (state.evaluatedItems.isEmpty()) {
+        // --- 5. LISTA DE ITENS COM BOTÕES DE AÇÃO ---
+        if (displayedItems.isEmpty()) {
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(24.dp)
             ) {
-                Text(
-                    "Nenhum item encontrado no filtro selecionado.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        if (activeBarcodeFilter != null) "Nenhum item com o código de barras $activeBarcodeFilter" else "Nenhum item encontrado no filtro selecionado.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (activeBarcodeFilter != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(onClick = { activeBarcodeFilter = null }) {
+                            Text("Limpar Filtro de Código de Barras")
+                        }
+                    }
+                }
             }
         } else {
             LazyColumn(
@@ -210,7 +279,7 @@ fun InventoryScreen(
                 contentPadding = PaddingValues(bottom = 80.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(state.evaluatedItems, key = { it.item.id }) { eval ->
+                items(displayedItems, key = { it.item.id }) { eval ->
                     InventoryItemCard(
                         eval = eval,
                         crisisMode = crisisMode,
@@ -222,6 +291,15 @@ fun InventoryScreen(
                 }
             }
         }
+    }
+
+    if (showBarcodeScannerModal) {
+        BarcodeScannerModal(
+            onDismiss = { showBarcodeScannerModal = false },
+            onBarcodeScanned = { scannedCode ->
+                activeBarcodeFilter = scannedCode
+            }
+        )
     }
 }
 
@@ -314,6 +392,40 @@ fun InventoryItemCard(
                 fontSize = 15.sp,
                 color = MaterialTheme.colorScheme.onSurface
             )
+
+            // Barcode EAN Badge (com Ícone de Código de Barras visível)
+            if (!item.barcode.isNullOrBlank()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .padding(top = 3.dp)
+                        .background(
+                            color = if (crisisMode) Color(0xFF0F172A) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            shape = RoundedCornerShape(4.dp)
+                        )
+                        .border(
+                            width = 0.5.dp,
+                            color = if (crisisMode) Color(0xFF0284C7) else MaterialTheme.colorScheme.outlineVariant,
+                            shape = RoundedCornerShape(4.dp)
+                        )
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.QrCodeScanner,
+                        contentDescription = "Código de Barras",
+                        tint = if (crisisMode) Color(0xFF38BDF8) else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "EAN: ${item.barcode}",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = if (crisisMode) Color(0xFFE2E8F0) else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
             // Alert message if not OK
             if (status != ItemAlertStatus.OK) {

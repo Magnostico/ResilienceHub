@@ -115,8 +115,8 @@ class MainActivity : ComponentActivity() {
                     if (showAddItemDialog) {
                         AddItemDialog(
                             onDismiss = { showAddItemDialog = false },
-                            onConfirm = { name, category, location, qty, unit, expDays ->
-                                viewModel.addNewItem(name, category, location, qty, unit, expDays)
+                            onConfirm = { name, barcode, category, location, qty, unit, expDays ->
+                                viewModel.addNewItem(name, category, location, qty, unit, expDays, barcode)
                             }
                         )
                     }
