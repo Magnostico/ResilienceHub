@@ -30,6 +30,7 @@ fun FamilyVaultScreen(
     modifier: Modifier = Modifier
 ) {
     val crisisMode = state.crisisMode
+    var showConfirmClearProfiles by remember { mutableStateOf(false) }
 
     // Pega o peso da primeira criança cadastrada ou padrão de 24.0 kg
     val childProfile = state.profiles.find { it.role == FamilyRole.CHILD }
@@ -209,7 +210,7 @@ fun FamilyVaultScreen(
             }
         }
 
-        // --- 3. CABEÇALHO E BOTÃO DE NOVO MEMBRO FAMILIAR ---
+        // --- 3. CABEÇALHO, BOTÃO NOVO FAMILIAR & LIMPAR FAMÍLIA ---
         item {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -217,31 +218,104 @@ fun FamilyVaultScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "Membros do Núcleo Familiar (${state.profiles.size}):",
+                    text = "Núcleo Familiar (${state.profiles.size}):",
                     fontWeight = FontWeight.ExtraBold,
                     fontSize = 15.sp,
                     color = Color.White
                 )
-                Button(
-                    onClick = onOpenAddProfileDialog,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF0284C7),
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text("Novo Familiar", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Button(
+                        onClick = onOpenAddProfileDialog,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFF59E0B),
+                            contentColor = Color(0xFF090D16)
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text("Novo Familiar", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+
+                    if (state.profiles.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = { showConfirmClearProfiles = true },
+                            border = BorderStroke(1.dp, Color(0xFFF87171)),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.DeleteSweep, contentDescription = "Limpar Família", tint = Color(0xFFF87171), modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Limpar", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
+                        }
+                    }
                 }
             }
         }
 
         // --- 4. LISTA DE FICHAS FAMILIARES ---
-        items(state.profiles, key = { it.id }) { profile ->
-            FamilyVaultProfileCard(profile = profile, crisisMode = crisisMode)
+        if (state.profiles.isEmpty()) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFF334155)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp)
+                    ) {
+                        Text(
+                            text = "Nenhum membro familiar cadastrado.",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Cadastre os adultos e crianças da sua família para cálculo exato de água e fichas médicas.",
+                            color = Color(0xFFCBD5E1),
+                            fontSize = 12.sp
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = onOpenAddProfileDialog,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF59E0B),
+                                contentColor = Color(0xFF090D16)
+                            )
+                        ) {
+                            Icon(Icons.Default.PersonAdd, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Cadastrar Familiar", fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+                }
+            }
+        } else {
+            items(state.profiles, key = { it.id }) { profile ->
+                FamilyVaultProfileCard(
+                    profile = profile,
+                    crisisMode = crisisMode,
+                    onDelete = { viewModel.deleteProfile(profile.id) }
+                )
+            }
         }
+    }
+
+    if (showConfirmClearProfiles) {
+        ConfirmClearDialog(
+            title = "Limpar Fichas Familiares?",
+            message = "Todos os perfis familiares fictícios ou cadastrados serão apagados para que você cadastre os membros da sua família.",
+            confirmButtonText = "Apagar Perfis",
+            onDismiss = { showConfirmClearProfiles = false },
+            onConfirm = { viewModel.clearAllProfiles() }
+        )
     }
 }
 
@@ -292,7 +366,8 @@ fun PediatricDoseRow(
 @Composable
 fun FamilyVaultProfileCard(
     profile: FamilyProfileEntity,
-    crisisMode: Boolean
+    crisisMode: Boolean,
+    onDelete: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(
@@ -313,7 +388,10 @@ fun FamilyVaultProfileCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Icon(
                         if (profile.role == FamilyRole.ADULT) Icons.Default.Person else Icons.Default.ChildCare,
                         contentDescription = null,
@@ -329,18 +407,36 @@ fun FamilyVaultProfileCard(
                     )
                 }
 
-                Surface(
-                    color = Color(0xFF3B0A0A),
-                    shape = RoundedCornerShape(6.dp),
-                    border = BorderStroke(1.dp, Color(0xFFF87171))
-                ) {
-                    Text(
-                        text = "Sangue ${profile.bloodType}",
-                        color = Color(0xFFF87171),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        color = Color(0xFF3B0A0A),
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(1.dp, Color(0xFFF87171))
+                    ) {
+                        Text(
+                            text = "Sangue ${profile.bloodType}",
+                            color = Color(0xFFF87171),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .testTag("btn_delete_profile_${profile.id}")
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Apagar Familiar",
+                            tint = Color(0xFFF87171),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
 

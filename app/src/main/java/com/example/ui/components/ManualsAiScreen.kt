@@ -27,11 +27,13 @@ import com.example.ui.MainViewModel
 fun ManualsAiScreen(
     state: MainUiState,
     viewModel: MainViewModel,
+    onOpenAddManualDialog: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val crisisMode = state.crisisMode
     val quickTopics = listOf("Clorin", "Água", "Torniquete", "Bateria", "Evacuação", "Regra dos Três")
     var ragQuestionInput by remember { mutableStateOf("") }
+    var showConfirmClearManuals by remember { mutableStateOf(false) }
 
     val pdfPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -53,7 +55,7 @@ fun ManualsAiScreen(
             .fillMaxSize()
             .testTag("manuals_ai_screen")
     ) {
-        // --- 1. AÇÕES DO TOPO: IMPORTAÇÃO DE PDF, MODELO IA & SWITCH MODO IA LOCAL ---
+        // --- 1. AÇÕES DO TOPO: CRIAR MANUAL, IMPORTAR PDF, MODELO IA & SWITCH MODO IA LOCAL ---
         item {
             Card(
                 colors = CardDefaults.cardColors(
@@ -69,7 +71,22 @@ fun ManualsAiScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Button(
+                                onClick = onOpenAddManualDialog,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF090D16)
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("btn_create_manual")
+                            ) {
+                                Icon(Icons.Default.NoteAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Novo Manual", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                            }
+
                             Button(
                                 onClick = { pdfPickerLauncher.launch("application/pdf") },
                                 colors = ButtonDefaults.buttonColors(
@@ -81,32 +98,32 @@ fun ManualsAiScreen(
                                 modifier = Modifier.testTag("btn_import_pdf")
                             ) {
                                 Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(5.dp))
-                                Text("Importar PDF", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("PDF", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
 
                             OutlinedButton(
                                 onClick = { modelPickerLauncher.launch("*/*") },
                                 border = BorderStroke(1.dp, Color(0xFFFBBF24)),
                                 shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
                                 modifier = Modifier.testTag("btn_import_model")
                             ) {
-                                Icon(Icons.Default.Memory, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(5.dp))
-                                Text("Modelo .task", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                                Icon(Icons.Default.Memory, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(".task", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
                             }
                         }
 
                         // Chave para ativar IA Local (MediaPipe LLM / RAG)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = if (state.ragModeAi) "IA Local" else "FTS Rápido",
-                                fontSize = 12.sp,
+                                text = if (state.ragModeAi) "IA Local" else "FTS",
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = if (state.ragModeAi) Color(0xFFFBBF24) else Color(0xFF34D399)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
                             Switch(
                                 checked = state.ragModeAi,
                                 onCheckedChange = { viewModel.setRagModeAi(it) },
@@ -166,7 +183,7 @@ fun ManualsAiScreen(
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Responde estritamente com base nos trechos oficiais das cartilhas (Gemma 4 / Motor Extrativo Offline).",
+                            text = "Responde com base nos seus manuais e PDFs cadastrados (Gemma 4 / Motor Extrativo Offline).",
                             fontSize = 12.sp,
                             color = Color(0xFFCBD5E1)
                         )
@@ -250,7 +267,7 @@ fun ManualsAiScreen(
                 }
             }
 
-            // Resposta gerada pela IA Local com Alto Contraste (Fundo Verde Escuro Profundo + Texto Branco)
+            // Resposta gerada pela IA Local com Alto Contraste
             state.ragResponse?.let { rag ->
                 item {
                     Card(
@@ -301,7 +318,7 @@ fun ManualsAiScreen(
                             Spacer(modifier = Modifier.height(12.dp))
 
                             Text(
-                                text = "Auditoria Visual (Fontes Oficiais Utilizadas):",
+                                text = "Auditoria Visual (Fontes Utilizadas):",
                                 fontWeight = FontWeight.ExtraBold,
                                 fontSize = 12.sp,
                                 color = Color(0xFFFBBF24)
@@ -406,74 +423,159 @@ fun ManualsAiScreen(
             }
         }
 
-        // --- 3. CABEÇALHO E LISTA DE TRECHOS INDEXADOS ---
+        // --- 3. CABEÇALHO E BOTÃO DE LIMPAR MANUAIS ---
         item {
-            Text(
-                text = "${state.manualChunks.size} protocolo(s) oficial(is) disponível(is) offline:",
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFFCBD5E1)
-            )
-        }
-
-        items(state.manualChunks, key = { it.rowId }) { chunk ->
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
-                ),
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(
-                    1.dp,
-                    if (crisisMode) Color(0xFF3F3F46) else Color(0xFF334155)
-                ),
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth()
+                Text(
+                    text = "${state.manualChunks.size} protocolo(s) / manual(is) cadastrado(s):",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White
+                )
+
+                if (state.manualChunks.isNotEmpty()) {
+                    TextButton(
+                        onClick = { showConfirmClearManuals = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                     ) {
-                        Surface(
-                            color = Color(0xFF0F2942),
-                            shape = RoundedCornerShape(6.dp),
-                            border = BorderStroke(0.5.dp, Color(0xFF38BDF8))
-                        ) {
-                            Text(
-                                text = chunk.category,
-                                color = Color(0xFF38BDF8),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
-                        }
-                        Text(
-                            text = "Pág. ${chunk.pageNumber}",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFFFBBF24)
-                        )
+                        Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = Color(0xFFF87171), modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Limpar Manuais", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
                     }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Text(
-                        text = chunk.docTitle,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 14.sp,
-                        color = Color.White
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Text(
-                        text = chunk.contentText,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp,
-                        color = Color(0xFFE2E8F0)
-                    )
                 }
             }
         }
+
+        if (state.manualChunks.isEmpty()) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFF334155)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp)
+                    ) {
+                        Text(
+                            text = "Nenhum manual ou protocolo cadastrado.",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Crie seu próprio manual/protocolo ou importe um arquivo PDF.",
+                            color = Color(0xFFCBD5E1),
+                            fontSize = 12.sp
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = onOpenAddManualDialog,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF59E0B),
+                                contentColor = Color(0xFF090D16)
+                            )
+                        ) {
+                            Icon(Icons.Default.NoteAdd, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Criar Meu Primeiro Manual", fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+                }
+            }
+        } else {
+            items(state.manualChunks, key = { it.rowId }) { chunk ->
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (crisisMode) Color(0xFF3F3F46) else Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    color = Color(0xFF0F2942),
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(0.5.dp, Color(0xFF38BDF8))
+                                ) {
+                                    Text(
+                                        text = chunk.category,
+                                        color = Color(0xFF38BDF8),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Pág. ${chunk.pageNumber}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFFFBBF24)
+                                )
+                            }
+
+                            IconButton(
+                                onClick = { viewModel.deleteManualChunk(chunk.rowId) },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.DeleteOutline,
+                                    contentDescription = "Apagar Manual",
+                                    tint = Color(0xFFF87171),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Text(
+                            text = chunk.docTitle,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 14.sp,
+                            color = Color.White
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Text(
+                            text = chunk.contentText,
+                            fontSize = 13.sp,
+                            lineHeight = 19.sp,
+                            color = Color(0xFFE2E8F0)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showConfirmClearManuals) {
+        ConfirmClearDialog(
+            title = "Apagar Todos os Manuais?",
+            message = "Todos os manuais e trechos fictícios serão apagados. Você poderá criar seus próprios protocolos ou importar novos PDFs.",
+            confirmButtonText = "Apagar Manuais",
+            onDismiss = { showConfirmClearManuals = false },
+            onConfirm = { viewModel.clearAllManualChunks() }
+        )
     }
 }

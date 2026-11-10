@@ -37,4 +37,7 @@ interface FamilyProfileDao {
 
     @Query("DELETE FROM family_profiles WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM family_profiles")
+    suspend fun clearAll()
 }

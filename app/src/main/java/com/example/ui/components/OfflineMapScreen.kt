@@ -103,6 +103,7 @@ fun OfflineMapScreen(
     }
     var isPreloadingTiles by remember { mutableStateOf(false) }
     var preloadStatusText by remember { mutableStateOf<String?>(null) }
+    var showConfirmClearPois by remember { mutableStateOf(false) }
 
     // Unificado em um único LazyColumn para scroll fluido de toda a tela
     LazyColumn(
@@ -438,40 +439,100 @@ fun OfflineMapScreen(
                     fontWeight = FontWeight.ExtraBold,
                     color = Color.White
                 )
-                TextButton(
-                    onClick = onOpenAddPoiDialog,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                ) {
-                    Icon(Icons.Default.AddLocationAlt, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Novo Ponto", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = onOpenAddPoiDialog,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Icon(Icons.Default.AddLocationAlt, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Novo Ponto", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                    }
+                    if (navList.isNotEmpty()) {
+                        TextButton(
+                            onClick = { showConfirmClearPois = true },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Default.DeleteSweep, contentDescription = "Limpar Pontos", tint = Color(0xFFF87171), modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("Limpar", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
+                        }
+                    }
                 }
             }
         }
 
         // --- 4. LISTA DE PONTOS DE ENCONTRO E APOIO ---
-        items(navList, key = { it.poiId }) { nav ->
-            val isSelected = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
-            PoiOfflineCard(
-                nav = nav,
-                isSelected = isSelected,
-                crisisMode = crisisMode,
-                onClick = {
-                    selectedPoiId = nav.poiId
-                    val targetPoi = state.pois.find { it.id == nav.poiId }
-                    if (targetPoi != null) {
-                        autoFollowUser = false
-                        mapCenterLat = targetPoi.latitude
-                        mapCenterLon = targetPoi.longitude
-                        if (mapZoom < 14) mapZoom = 14
+        if (navList.isEmpty()) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
+                    ) {
+                        Text(
+                            text = "Nenhum Ponto de Encontro ou Apoio cadastrado.",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = onOpenAddPoiDialog,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF59E0B),
+                                contentColor = Color(0xFF090D16)
+                            )
+                        ) {
+                            Icon(Icons.Default.AddLocationAlt, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Cadastrar Meu Ponto de Encontro", fontWeight = FontWeight.ExtraBold)
+                        }
                     }
                 }
-            )
+            }
+        } else {
+            items(navList, key = { it.poiId }) { nav ->
+                val isSelected = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
+                PoiOfflineCard(
+                    nav = nav,
+                    isSelected = isSelected,
+                    crisisMode = crisisMode,
+                    onClick = {
+                        selectedPoiId = nav.poiId
+                        val targetPoi = state.pois.find { it.id == nav.poiId }
+                        if (targetPoi != null) {
+                            autoFollowUser = false
+                            mapCenterLat = targetPoi.latitude
+                            mapCenterLon = targetPoi.longitude
+                            if (mapZoom < 14) mapZoom = 14
+                        }
+                    },
+                    onDelete = { viewModel.deletePoi(nav.poiId) }
+                )
+            }
         }
 
         item {
             Spacer(modifier = Modifier.height(76.dp))
         }
+    }
+
+    if (showConfirmClearPois) {
+        ConfirmClearDialog(
+            title = "Limpar Todos os Pontos do Mapa?",
+            message = "Todos os pontos de encontro, hospitais e abrigos fictícios serão removidos para que você cadastre os seus próprios locais.",
+            confirmButtonText = "Apagar Pontos",
+            onDismiss = { showConfirmClearPois = false },
+            onConfirm = { viewModel.clearAllPois() }
+        )
     }
 
     // =========================================================================
@@ -1495,7 +1556,8 @@ fun PoiOfflineCard(
     nav: RationingAndAlertEngine.PoiNavigationInfo,
     isSelected: Boolean,
     crisisMode: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDelete: (() -> Unit)? = null
 ) {
     val isFamily = nav.poiType.contains("Famili", ignoreCase = true)
     val isHospital = nav.poiType.contains("Hospital", ignoreCase = true)
@@ -1585,12 +1647,28 @@ fun PoiOfflineCard(
             }
 
             Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = nav.distanceFormatted,
-                    fontWeight = FontWeight.Black,
-                    fontSize = 17.sp,
-                    color = if (isFamily) Color(0xFFFBBF24) else Color.White
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = nav.distanceFormatted,
+                        fontWeight = FontWeight.Black,
+                        fontSize = 16.sp,
+                        color = if (isFamily) Color(0xFFFBBF24) else Color.White
+                    )
+                    if (onDelete != null) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        IconButton(
+                            onClick = onDelete,
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.DeleteOutline,
+                                contentDescription = "Apagar Ponto",
+                                tint = Color(0xFFF87171),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
                 if (nav.phone != null) {
                     Text(
                         text = nav.phone,

@@ -33,6 +33,9 @@ class ResilienceRepository(private val database: AppDatabase) {
     suspend fun deleteItemById(id: Long) =
         database.inventoryDao().deleteById(id)
 
+    suspend fun clearAllItems() =
+        database.inventoryDao().clearAll()
+
     suspend fun updateQuantity(id: Long, newQuantity: Double) =
         database.inventoryDao().updateQuantity(id, newQuantity)
 
@@ -51,6 +54,12 @@ class ResilienceRepository(private val database: AppDatabase) {
     suspend fun deleteProfile(profile: FamilyProfileEntity) =
         database.familyProfileDao().deleteProfile(profile)
 
+    suspend fun deleteProfileById(id: Long) =
+        database.familyProfileDao().deleteById(id)
+
+    suspend fun clearAllProfiles() =
+        database.familyProfileDao().clearAll()
+
     // --- Map POIs ---
     val allPois: Flow<List<MapPoiEntity>> = database.mapPoiDao().getAllPois()
 
@@ -64,6 +73,12 @@ class ResilienceRepository(private val database: AppDatabase) {
 
     suspend fun deletePoi(poi: MapPoiEntity) =
         database.mapPoiDao().deletePoi(poi)
+
+    suspend fun deletePoiById(id: Long) =
+        database.mapPoiDao().deleteById(id)
+
+    suspend fun clearAllPois() =
+        database.mapPoiDao().clearAll()
 
     // --- FTS Manuals ---
     val allManualChunks: Flow<List<ManualChunkFtsEntity>> = database.manualChunkDao().getAllChunks()
@@ -83,4 +98,17 @@ class ResilienceRepository(private val database: AppDatabase) {
 
     suspend fun insertChunk(chunk: ManualChunkFtsEntity): Long =
         database.manualChunkDao().insertChunk(chunk)
+
+    suspend fun deleteManualChunk(rowId: Int) =
+        database.manualChunkDao().deleteChunk(rowId)
+
+    suspend fun clearAllManualChunks() =
+        database.manualChunkDao().clearAll()
+
+    suspend fun clearAllDatabaseData() {
+        database.inventoryDao().clearAll()
+        database.familyProfileDao().clearAll()
+        database.mapPoiDao().clearAll()
+        database.manualChunkDao().clearAll()
+    }
 }

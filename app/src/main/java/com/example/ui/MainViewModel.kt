@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.Calendar
 import java.util.Locale
 
 data class MainUiState(
@@ -63,6 +64,28 @@ data class MainUiState(
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    companion object {
+        /**
+         * Converte Mês (1..12) e Ano (ex: 2027) para o timestamp do último dia daquele mês às 23:59:59.
+         */
+        fun monthYearToExpirationTimestamp(month: Int?, year: Int?): Long? {
+            if (month == null || year == null) return null
+            val validMonth = month.coerceIn(1, 12) - 1 // Calendar.MONTH é 0-based (0 = Janeiro)
+            val validYear = year.coerceIn(2020, 2100)
+            val cal = Calendar.getInstance().apply {
+                set(Calendar.YEAR, validYear)
+                set(Calendar.MONTH, validMonth)
+                val lastDay = getActualMaximum(Calendar.DAY_OF_MONTH)
+                set(Calendar.DAY_OF_MONTH, lastDay)
+                set(Calendar.HOUR_OF_DAY, 23)
+                set(Calendar.MINUTE, 59)
+                set(Calendar.SECOND, 59)
+                set(Calendar.MILLISECOND, 999)
+            }
+            return cal.timeInMillis
+        }
+    }
 
     private val database = AppDatabase.getInstance(application)
     private val repository = ResilienceRepository(database)
@@ -131,10 +154,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _movementTrail.value = listOf(lat to lon)
             return
         }
-        val distMeters = engine.haversineMeters(last.first, last.second, lat, lon)
+        val distMeters = engine.haversineDistanceMeters(last.first, last.second, lat, lon)
         if (distMeters >= 1.0) {
-            // Calcula rumo estimado caso o chip GPS não forneça bearing em baixa velocidade
-            val bearing = engine.initialBearingDegrees(last.first, last.second, lat, lon).toFloat()
+            val bearing = engine.calculateBearingDegrees(last.first, last.second, lat, lon).toFloat()
             if (_currentHeadingDegrees.value == 0f || distMeters >= 2.0) {
                 _currentHeadingDegrees.value = bearing
             }
@@ -388,7 +410,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- Inventory, Profiles, POI Mutations ---
+    // --- Inventory, Profiles, POI, Manuals Mutations & Deletion ---
 
     fun updateItemQuantity(itemId: Long, delta: Double) {
         viewModelScope.launch {
@@ -405,8 +427,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Girar/Renovar Item: retira o lote prestes a vencer para consumo da casa
-     * e registra a reposição com novo prazo de validade (padrão 180 dias).
+     * Girar/Renovar Item: atualiza para novo prazo ou Mês/Ano escolhido.
      */
     fun rotateItem(itemId: Long, extendDays: Int = 180) {
         viewModelScope.launch {
@@ -414,6 +435,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val newExp = System.currentTimeMillis() + (extendDays.toLong() * 24 * 3600 * 1000)
             val updated = item.copy(expirationDate = newExp)
             repository.updateItem(updated)
+        }
+    }
+
+    fun updateItemExpirationMonthYear(itemId: Long, month: Int, year: Int) {
+        viewModelScope.launch {
+            val item = uiState.value.items.find { it.id == itemId } ?: return@launch
+            val newExp = monthYearToExpirationTimestamp(month, year)
+            repository.updateItem(item.copy(expirationDate = newExp))
+        }
+    }
+
+    fun addNewItemWithMonthYear(
+        name: String,
+        category: ItemCategory,
+        location: StorageLocation,
+        quantity: Double,
+        unit: String,
+        expirationMonth: Int?,
+        expirationYear: Int?,
+        barcode: String? = null
+    ) {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val expDate = monthYearToExpirationTimestamp(expirationMonth, expirationYear)
+            val lastMaint = if (category == ItemCategory.ENERGY_GEAR) now else null
+
+            repository.insertItem(
+                InventoryItemEntity(
+                    name = name,
+                    barcode = barcode?.ifBlank { null },
+                    category = category,
+                    location = location,
+                    quantity = quantity,
+                    unit = unit,
+                    expirationDate = expDate,
+                    lastMaintenanceDate = lastMaint,
+                    alertDaysBefore = 90
+                )
+            )
         }
     }
 
@@ -447,6 +507,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun deleteItem(itemId: Long) {
+        viewModelScope.launch {
+            repository.deleteItemById(itemId)
+        }
+    }
+
+    fun clearAllItems() {
+        viewModelScope.launch {
+            repository.clearAllItems()
+        }
+    }
+
     fun addNewProfile(
         name: String,
         role: FamilyRole,
@@ -469,6 +541,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun deleteProfile(profileId: Long) {
+        viewModelScope.launch {
+            repository.deleteProfileById(profileId)
+        }
+    }
+
+    fun clearAllProfiles() {
+        viewModelScope.launch {
+            repository.clearAllProfiles()
+        }
+    }
+
     fun addNewPoi(
         title: String,
         type: PoiType,
@@ -488,6 +572,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     phone = phone
                 )
             )
+        }
+    }
+
+    fun deletePoi(poiId: Long) {
+        viewModelScope.launch {
+            repository.deletePoiById(poiId)
+        }
+    }
+
+    fun clearAllPois() {
+        viewModelScope.launch {
+            repository.clearAllPois()
+        }
+    }
+
+    fun addNewManualChunk(
+        docTitle: String,
+        category: String,
+        pageNumber: Int,
+        contentText: String
+    ) {
+        viewModelScope.launch {
+            repository.insertChunk(
+                ManualChunkFtsEntity(
+                    docTitle = docTitle.trim(),
+                    category = category.trim().ifBlank { "GERAL" },
+                    pageNumber = pageNumber.coerceAtLeast(1),
+                    contentText = contentText.trim()
+                )
+            )
+            _pdfImportStatus.value = "✓ Manual/Protocolo \"${docTitle.trim()}\" criado e indexado offline!"
+        }
+    }
+
+    fun deleteManualChunk(rowId: Int) {
+        viewModelScope.launch {
+            repository.deleteManualChunk(rowId)
+        }
+    }
+
+    fun clearAllManualChunks() {
+        viewModelScope.launch {
+            repository.clearAllManualChunks()
+            _ragResponse.value = null
+            _pdfImportStatus.value = "✓ Todos os manuais foram removidos."
+        }
+    }
+
+    /**
+     * Limpa absolutamente todos os dados cadastrados/fictícios do app (Estoque, Família, Pontos do Mapa e Manuais)
+     * para o usuário começar 100% do zero com seus próprios dados.
+     */
+    fun clearAllFictionalData() {
+        viewModelScope.launch {
+            repository.clearAllDatabaseData()
+            _ragResponse.value = null
+            _pdfImportStatus.value = "✓ Todos os dados fictícios foram apagados!"
         }
     }
 

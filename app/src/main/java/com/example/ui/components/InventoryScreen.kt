@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -18,6 +19,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.entity.InventoryItemEntity
 import com.example.data.model.ItemAlertStatus
 import com.example.data.model.ItemCategory
 import com.example.data.model.StorageLocation
@@ -41,6 +43,8 @@ fun InventoryScreen(
 
     var showBarcodeScannerModal by remember { mutableStateOf(false) }
     var activeBarcodeFilter by remember { mutableStateOf<String?>(null) }
+    var itemToEditExpiration by remember { mutableStateOf<InventoryItemEntity?>(null) }
+    var showConfirmClearAllItems by remember { mutableStateOf(false) }
 
     val displayedItems = remember(state.evaluatedItems, activeBarcodeFilter) {
         if (activeBarcodeFilter.isNullOrBlank()) {
@@ -73,10 +77,7 @@ fun InventoryScreen(
                             containerColor = if (crisisMode) Color.Black else Color(0xFF0F1E33)
                         ),
                         shape = RoundedCornerShape(12.dp),
-                        border = androidx.compose.foundation.BorderStroke(
-                            1.dp,
-                            Color(0xFF38BDF8)
-                        ),
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8)),
                         modifier = Modifier.weight(1f)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
@@ -119,10 +120,7 @@ fun InventoryScreen(
                             containerColor = if (crisisMode) Color.Black else if (bugoutReady) Color(0xFF07261D) else Color(0xFF2B1608)
                         ),
                         shape = RoundedCornerShape(12.dp),
-                        border = androidx.compose.foundation.BorderStroke(
-                            1.dp,
-                            bugoutColor
-                        ),
+                        border = BorderStroke(1.dp, bugoutColor),
                         modifier = Modifier.weight(1f)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
@@ -161,7 +159,7 @@ fun InventoryScreen(
             }
         }
 
-        // --- 2. BARRA DE AÇÃO: LEITOR DE CÓDIGO DE BARRAS & CADASTRO RÁPIDO ---
+        // --- 2. BARRA DE AÇÃO: LEITOR DE CÓDIGO DE BARRAS, NOVO ITEM & LIMPAR ESTOQUE ---
         item {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -175,7 +173,7 @@ fun InventoryScreen(
                         contentColor = Color.White
                     ),
                     shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
                     modifier = Modifier
                         .weight(1f)
                         .testTag("btn_scan_barcode_inventory")
@@ -183,11 +181,11 @@ fun InventoryScreen(
                     Icon(
                         imageVector = Icons.Default.QrCodeScanner,
                         contentDescription = "Escanear Código de Barras",
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "Escanear Código EAN",
+                        text = "Escanear EAN",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -202,9 +200,27 @@ fun InventoryScreen(
                     shape = RoundedCornerShape(10.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(17.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("Novo Item", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                }
+
+                if (state.items.isNotEmpty()) {
+                    OutlinedButton(
+                        onClick = { showConfirmClearAllItems = true },
+                        border = BorderStroke(1.dp, Color(0xFFF87171)),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteSweep,
+                            contentDescription = "Limpar Estoque",
+                            tint = Color(0xFFF87171),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Limpar", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
+                    }
                 }
             }
         }
@@ -246,7 +262,7 @@ fun InventoryScreen(
                 Surface(
                     color = if (crisisMode) Color(0xFF1F0707) else Color(0xFF3B0A0A),
                     shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF87171)),
+                    border = BorderStroke(1.dp, Color(0xFFF87171)),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("inventory_alert_banner")
@@ -382,15 +398,16 @@ fun InventoryScreen(
             }
         }
 
-        // --- 5. LISTA DE ITENS COM ALTO CONTRASTE E BOTÕES DE AÇÃO ---
+        // --- 5. LISTA DE ITENS COM VALIDADE MÊS/ANO E BOTÃO DE EXCLUIR ---
         if (displayedItems.isEmpty()) {
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
                     shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFF334155)),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 16.dp)
+                        .padding(vertical = 12.dp)
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -400,15 +417,27 @@ fun InventoryScreen(
                     ) {
                         Text(
                             if (activeBarcodeFilter != null) "Nenhum item com o código EAN $activeBarcodeFilter"
-                            else "Nenhum item encontrado no filtro selecionado.",
+                            else "Estoque vazio. Toque em 'Novo Item' para cadastrar seus suprimentos.",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp
                         )
+                        Spacer(modifier = Modifier.height(10.dp))
                         if (activeBarcodeFilter != null) {
-                            Spacer(modifier = Modifier.height(10.dp))
                             Button(onClick = { activeBarcodeFilter = null }) {
                                 Text("Limpar Filtro de Código de Barras")
+                            }
+                        } else {
+                            Button(
+                                onClick = onOpenAddDialog,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF090D16)
+                                )
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Cadastrar Meu Primeiro Item", fontWeight = FontWeight.ExtraBold)
                             }
                         }
                     }
@@ -421,8 +450,9 @@ fun InventoryScreen(
                     crisisMode = crisisMode,
                     onAddQty = { viewModel.updateItemQuantity(eval.item.id, 1.0) },
                     onRemoveQty = { viewModel.updateItemQuantity(eval.item.id, -1.0) },
-                    onRotateItem = { viewModel.rotateItem(eval.item.id, 180) },
-                    onRegisterMaintenance = { viewModel.registerBatteryMaintenance(eval.item.id) }
+                    onEditExpirationMonthYear = { itemToEditExpiration = eval.item },
+                    onRegisterMaintenance = { viewModel.registerBatteryMaintenance(eval.item.id) },
+                    onDeleteItem = { viewModel.deleteItem(eval.item.id) }
                 )
             }
         }
@@ -436,6 +466,27 @@ fun InventoryScreen(
             }
         )
     }
+
+    itemToEditExpiration?.let { targetItem ->
+        EditExpirationMonthYearDialog(
+            itemName = targetItem.name,
+            currentExpirationMillis = targetItem.expirationDate,
+            onDismiss = { itemToEditExpiration = null },
+            onConfirm = { newMonth, newYear ->
+                viewModel.updateItemExpirationMonthYear(targetItem.id, newMonth, newYear)
+            }
+        )
+    }
+
+    if (showConfirmClearAllItems) {
+        ConfirmClearDialog(
+            title = "Limpar Todo o Estoque?",
+            message = "Todos os itens fictícios ou cadastrados no estoque serão removidos para que você possa cadastrar apenas os seus.",
+            confirmButtonText = "Apagar Estoque",
+            onDismiss = { showConfirmClearAllItems = false },
+            onConfirm = { viewModel.clearAllItems() }
+        )
+    }
 }
 
 @Composable
@@ -444,15 +495,15 @@ fun InventoryItemCard(
     crisisMode: Boolean,
     onAddQty: () -> Unit,
     onRemoveQty: () -> Unit,
-    onRotateItem: () -> Unit,
-    onRegisterMaintenance: () -> Unit
+    onEditExpirationMonthYear: () -> Unit,
+    onRegisterMaintenance: () -> Unit,
+    onDeleteItem: () -> Unit
 ) {
     val item = eval.item
     val status = eval.status
 
     val borderColor = getCrisisBorderColor(status.severityLevel, crisisMode)
 
-    // Cores de alto contraste (Fundo escuro rico + Texto luminoso legível)
     val statusBgColor = when (status) {
         ItemAlertStatus.OK -> Color(0xFF062E22)
         ItemAlertStatus.GIRAR_90_DIAS -> Color(0xFF2E2105)
@@ -474,19 +525,22 @@ fun InventoryItemCard(
             containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
         ),
         shape = RoundedCornerShape(12.dp),
-        border = androidx.compose.foundation.BorderStroke(1.2.dp, borderColor),
+        border = BorderStroke(1.2.dp, borderColor),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("inventory_item_${item.id}")
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Header: Category, Location & Status Badge
+            // Header: Category, Location, Status Badge & Delete Button
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Icon(
                         if (item.location == StorageLocation.APARTMENT) Icons.Default.Home else Icons.Default.Backpack,
                         contentDescription = null,
@@ -502,26 +556,42 @@ fun InventoryItemCard(
                     )
                 }
 
-                // Status Badge
-                Surface(
-                    color = statusBgColor,
-                    shape = RoundedCornerShape(6.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, statusTextColor),
-                    modifier = Modifier.padding(start = 6.dp)
-                ) {
-                    Text(
-                        text = status.title,
-                        color = statusTextColor,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        color = statusBgColor,
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(1.dp, statusTextColor)
+                    ) {
+                        Text(
+                            text = status.title,
+                            color = statusTextColor,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    IconButton(
+                        onClick = onDeleteItem,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .testTag("btn_delete_item_${item.id}")
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Apagar Item",
+                            tint = Color(0xFFF87171),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Item Name (Branco Puro para leitura imediata)
+            // Item Name
             Text(
                 text = item.name,
                 fontWeight = FontWeight.ExtraBold,
@@ -574,27 +644,43 @@ fun InventoryItemCard(
                 )
             }
 
-            // Expiration and Maintenance info
-            val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
+            // Exibição da Validade em Mês/Ano (MM/yyyy) e Manutenção
+            val monthYearFormat = SimpleDateFormat("MM/yyyy", Locale.getDefault())
+            val fullDateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
             Row(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 6.dp)
+                    .padding(top = 8.dp)
             ) {
                 Column {
                     if (item.expirationDate != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Event,
+                                contentDescription = null,
+                                tint = Color(0xFFFBBF24),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Validade (Mês/Ano): ${monthYearFormat.format(Date(item.expirationDate))}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                        }
+                    } else if (item.category != ItemCategory.ENERGY_GEAR) {
                         Text(
-                            text = "Validade: ${dateFormat.format(Date(item.expirationDate))}",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = Color(0xFFCBD5E1)
+                            text = "Sem prazo de validade definido",
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8)
                         )
                     }
                     if (item.lastMaintenanceDate != null) {
                         Text(
-                            text = "Última Carga: ${dateFormat.format(Date(item.lastMaintenanceDate))}",
+                            text = "Última Carga: ${fullDateFormat.format(Date(item.lastMaintenanceDate))}",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                             color = Color(0xFFCBD5E1)
@@ -602,7 +688,7 @@ fun InventoryItemCard(
                     }
                 }
 
-                // Action buttons: "Girar/Renovar" ou "Recarregar"
+                // Action buttons: "Mês/Ano" (Girar/Editar Validade) ou "Recarregar"
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (item.category == ItemCategory.ENERGY_GEAR) {
                         Button(
@@ -621,19 +707,19 @@ fun InventoryItemCard(
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("Recarregar", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
-                    } else if (item.expirationDate != null) {
+                    } else {
                         OutlinedButton(
-                            onClick = onRotateItem,
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFBBF24)),
+                            onClick = onEditExpirationMonthYear,
+                            border = BorderStroke(1.dp, Color(0xFFFBBF24)),
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             modifier = Modifier
                                 .height(32.dp)
                                 .testTag("btn_rotate_${item.id}")
                         ) {
-                            Icon(Icons.Default.Autorenew, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(15.dp))
+                            Icon(Icons.Default.EditCalendar, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(15.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Girar Lote", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                            Text("Mês/Ano", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
                         }
                     }
                 }

@@ -38,4 +38,7 @@ interface MapPoiDao {
 
     @Query("DELETE FROM map_pois WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM map_pois")
+    suspend fun clearAll()
 }

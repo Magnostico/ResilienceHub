@@ -44,6 +44,8 @@ class MainActivity : ComponentActivity() {
             var showAddItemDialog by remember { mutableStateOf(false) }
             var showAddPoiDialog by remember { mutableStateOf(false) }
             var showAddProfileDialog by remember { mutableStateOf(false) }
+            var showAddManualDialog by remember { mutableStateOf(false) }
+            var showConfirmClearAllApp by remember { mutableStateOf(false) }
 
             val permissionsToRequest = remember {
                 val list = mutableListOf(
@@ -77,7 +79,8 @@ class MainActivity : ComponentActivity() {
                             isSosActive = state.isSosActive,
                             isWhistleActive = state.isWhistleActive,
                             isLiveTracking = state.isLiveTracking,
-                            onToggleCrisisMode = { viewModel.toggleCrisisMode() }
+                            onToggleCrisisMode = { viewModel.toggleCrisisMode() },
+                            onRequestClearAllData = { showConfirmClearAllApp = true }
                         )
                     },
                     bottomBar = {
@@ -107,6 +110,16 @@ class MainActivity : ComponentActivity() {
                                     modifier = Modifier.testTag("fab_add_poi")
                                 ) {
                                     Icon(Icons.Default.AddLocationAlt, contentDescription = "Adicionar Ponto")
+                                }
+                            }
+                            2 -> {
+                                FloatingActionButton(
+                                    onClick = { showAddManualDialog = true },
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF090D16),
+                                    modifier = Modifier.testTag("fab_add_manual")
+                                ) {
+                                    Icon(Icons.Default.NoteAdd, contentDescription = "Criar Manual")
                                 }
                             }
                             4 -> {
@@ -140,7 +153,8 @@ class MainActivity : ComponentActivity() {
                             )
                             2 -> ManualsAiScreen(
                                 state = state,
-                                viewModel = viewModel
+                                viewModel = viewModel,
+                                onOpenAddManualDialog = { showAddManualDialog = true }
                             )
                             3 -> EmergencyToolsScreen(
                                 state = state,
@@ -157,14 +171,25 @@ class MainActivity : ComponentActivity() {
                     if (showAddItemDialog) {
                         AddItemDialog(
                             onDismiss = { showAddItemDialog = false },
-                            onConfirm = { name, barcode, category, location, qty, unit, expDays ->
-                                viewModel.addNewItem(name, category, location, qty, unit, expDays, barcode)
+                            onConfirm = { name, barcode, category, location, qty, unit, expMonth, expYear ->
+                                viewModel.addNewItemWithMonthYear(
+                                    name = name,
+                                    category = category,
+                                    location = location,
+                                    quantity = qty,
+                                    unit = unit,
+                                    expirationMonth = expMonth,
+                                    expirationYear = expYear,
+                                    barcode = barcode
+                                )
                             }
                         )
                     }
 
                     if (showAddPoiDialog) {
                         AddPoiDialog(
+                            currentUserLat = state.currentLat,
+                            currentUserLon = state.currentLon,
                             onDismiss = { showAddPoiDialog = false },
                             onConfirm = { title, type, lat, lon, address, phone ->
                                 viewModel.addNewPoi(title, type, lat, lon, address, phone)
@@ -180,6 +205,25 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
+
+                    if (showAddManualDialog) {
+                        AddManualChunkDialog(
+                            onDismiss = { showAddManualDialog = false },
+                            onConfirm = { docTitle, category, pageNumber, contentText ->
+                                viewModel.addNewManualChunk(docTitle, category, pageNumber, contentText)
+                            }
+                        )
+                    }
+
+                    if (showConfirmClearAllApp) {
+                        ConfirmClearDialog(
+                            title = "Apagar Todos os Dados Fictícios?",
+                            message = "Isso apagará de uma só vez todos os itens fictícios de Estoque, Família, Pontos do Mapa e Manuais para que você possa cadastrar 100% os seus próprios dados.",
+                            confirmButtonText = "Sim, Zerar Tudo",
+                            onDismiss = { showConfirmClearAllApp = false },
+                            onConfirm = { viewModel.clearAllFictionalData() }
+                        )
+                    }
                 }
             }
         }
@@ -193,7 +237,8 @@ fun ResilienceTopBar(
     isSosActive: Boolean,
     isWhistleActive: Boolean,
     isLiveTracking: Boolean,
-    onToggleCrisisMode: () -> Unit
+    onToggleCrisisMode: () -> Unit,
+    onRequestClearAllData: () -> Unit
 ) {
     TopAppBar(
         title = {
@@ -203,13 +248,13 @@ fun ResilienceTopBar(
                         Icons.Default.Shield,
                         contentDescription = null,
                         tint = Color(0xFFFBBF24),
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(19.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "ResilienceHub",
                         fontWeight = FontWeight.Black,
-                        fontSize = 18.sp,
+                        fontSize = 17.sp,
                         color = Color.White
                     )
 
@@ -220,11 +265,11 @@ fun ResilienceTopBar(
                             shape = RoundedCornerShape(4.dp)
                         ) {
                             Text(
-                                text = "BEACON ATIVO",
+                                text = "BEACON",
                                 color = Color.White,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                             )
                         }
                     } else if (isLiveTracking) {
@@ -238,7 +283,7 @@ fun ResilienceTopBar(
                                 color = Color.White,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                             )
                         }
                     }
@@ -252,7 +297,7 @@ fun ResilienceTopBar(
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = "100% OFFLINE • PROTOCOLO FEFO",
-                        fontSize = 10.sp,
+                        fontSize = 9.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color(0xFF34D399)
                     )
@@ -260,6 +305,18 @@ fun ResilienceTopBar(
             }
         },
         actions = {
+            // Botão global para apagar todos os dados fictícios do app de uma só vez
+            IconButton(
+                onClick = onRequestClearAllData,
+                modifier = Modifier.testTag("btn_clear_all_fictional_data")
+            ) {
+                Icon(
+                    Icons.Default.DeleteSweep,
+                    contentDescription = "Apagar Dados Fictícios",
+                    tint = Color(0xFFF87171)
+                )
+            }
+
             // Switch MODO CRISE OLED com alto contraste
             Row(
                 verticalAlignment = Alignment.CenterVertically,
