@@ -1,8 +1,8 @@
 package com.example.ui.components
 
 import android.content.Context
-import android.os.Bundle
 import android.util.Log
+import android.view.View
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -46,7 +46,7 @@ import java.io.File
 
 private const val TAG = "OfflineMapScreen"
 
-// Estilo tático com fonte raster OpenStreetMap + fallback escuro
+// Estilo tático escuro embutido para renderização offline
 private val OFFLINE_DARK_STYLE_JSON = """
 {
   "version": 8,
@@ -96,21 +96,56 @@ fun OfflineMapScreen(
     val crisisMode = state.crisisMode
     val navList = state.poiNavigationList
 
-    // Inicializa o MapLibre Singleton uma única vez
-    LaunchedEffect(Unit) {
+    // Inicialização síncrona segura do MapLibre antes de renderizar qualquer View
+    val isMapLibreReady = remember {
         try {
             MapLibre.getInstance(context)
-        } catch (e: Exception) {
-            Log.e(TAG, "Erro ao inicializar MapLibre", e)
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "Falha ao inicializar MapLibre nativo", t)
+            false
         }
     }
 
-    // Seleciona o ponto de foco (padrão é o Ponto de Encontro Familiar mais próximo)
     var selectedPoiId by remember { mutableStateOf<Long?>(null) }
     val focusedPoi = navList.find { it.poiId == selectedPoiId } ?: navList.firstOrNull()
 
     var mapLibreInstance by remember { mutableStateOf<MapLibreMap?>(null) }
+    var activeMapView by remember { mutableStateOf<MapView?>(null) }
+    var mapInitError by remember { mutableStateOf<String?>(if (!isMapLibreReady) "Biblioteca nativa MapLibre indisponível neste aparelho" else null) }
     var isMapExpanded by remember { mutableStateOf(false) }
+
+    // Gerenciamento seguro do ciclo de vida do MapView
+    DisposableEffect(lifecycleOwner, activeMapView) {
+        val mv = activeMapView
+        if (mv == null) {
+            onDispose { }
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                try {
+                    when (event) {
+                        Lifecycle.Event.ON_START -> mv.onStart()
+                        Lifecycle.Event.ON_RESUME -> mv.onResume()
+                        Lifecycle.Event.ON_PAUSE -> mv.onPause()
+                        Lifecycle.Event.ON_STOP -> mv.onStop()
+                        Lifecycle.Event.ON_DESTROY -> mv.onDestroy()
+                        else -> {}
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Exceção no ciclo de vida MapView: $event", e)
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+                try {
+                    mv.onDestroy()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Erro ao destruir MapView", e)
+                }
+            }
+        }
+    }
 
     Column(
         modifier = modifier
@@ -118,7 +153,7 @@ fun OfflineMapScreen(
             .padding(horizontal = 14.dp)
             .testTag("offline_map_screen")
     ) {
-        // --- 1. PAINEL BÚSSOLA & DISTÂNCIA DE EMERGÊNCIA ---
+        // --- 1. PAINEL BÚSSOLA & DISTÂNCIA DE EMERGÊNCIA (100% OFFLINE) ---
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surface
@@ -163,8 +198,12 @@ fun OfflineMapScreen(
                             onClick = {
                                 viewModel.triggerSingleShotGpsPulse()
                                 mapLibreInstance?.let { map ->
-                                    val userPos = LatLng(state.currentLat, state.currentLon)
-                                    map.animateCamera(CameraUpdateFactory.newLatLngZoom(userPos, 14.0))
+                                    try {
+                                        val userPos = LatLng(state.currentLat, state.currentLon)
+                                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(userPos, 14.0))
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Erro ao animar câmera para GPS", e)
+                                    }
                                 }
                             },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
@@ -271,7 +310,7 @@ fun OfflineMapScreen(
             }
         }
 
-        // --- 2. MAPA REAL MAPLIBRE NATIVE SDK COM SUPORTE OFFLINE ---
+        // --- 2. MAPA OFFLINE REAL (À PROVA DE FALHAS / CRASH-PROOF) ---
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = if (crisisMode) Color.Black else Color(0xFF0F172A)
@@ -286,82 +325,85 @@ fun OfflineMapScreen(
                 .height(if (isMapExpanded) 320.dp else 190.dp)
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                val mapView = remember {
-                    MapView(context).apply {
-                        onCreate(null)
-                    }
-                }
+                if (mapInitError == null) {
+                    // Tenta renderizar o MapView real do MapLibre Native
+                    AndroidView(
+                        factory = { ctx ->
+                            try {
+                                MapLibre.getInstance(ctx)
+                                val mv = MapView(ctx)
+                                mv.onCreate(null)
+                                mv.getMapAsync { map ->
+                                    mapLibreInstance = map
+                                    try {
+                                        val localMbtiles = File(ctx.filesDir, "rio_janeiro.mbtiles")
+                                        val localStyle = File(ctx.filesDir, "style.json")
 
-                // Gerenciamento de ciclo de vida do MapView
-                DisposableEffect(lifecycleOwner) {
-                    val observer = LifecycleEventObserver { _, event ->
-                        when (event) {
-                            Lifecycle.Event.ON_START -> mapView.onStart()
-                            Lifecycle.Event.ON_RESUME -> mapView.onResume()
-                            Lifecycle.Event.ON_PAUSE -> mapView.onPause()
-                            Lifecycle.Event.ON_STOP -> mapView.onStop()
-                            Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
-                            else -> {}
-                        }
-                    }
-                    lifecycleOwner.lifecycle.addObserver(observer)
-                    onDispose {
-                        lifecycleOwner.lifecycle.removeObserver(observer)
-                        mapView.onDestroy()
-                    }
-                }
+                                        val styleBuilder = when {
+                                            localStyle.exists() -> Style.Builder().fromUri("file://${localStyle.absolutePath}")
+                                            localMbtiles.exists() -> Style.Builder().fromJson(OFFLINE_DARK_STYLE_JSON)
+                                            else -> Style.Builder().fromJson(OFFLINE_DARK_STYLE_JSON)
+                                        }
 
-                AndroidView(
-                    factory = { mapView },
-                    modifier = Modifier.fillMaxSize()
-                ) { view ->
-                    view.getMapAsync { map ->
-                        mapLibreInstance = map
+                                        map.setStyle(styleBuilder) {
+                                            try {
+                                                map.clear()
 
-                        // Configura Estilo (Local se existir arquivo .mbtiles / .pmtiles ou estilo tático embutido)
-                        val localMbtiles = File(context.filesDir, "rio_janeiro.mbtiles")
-                        val localStyle = File(context.filesDir, "style.json")
+                                                // Posição do Usuário (GPS Pulso)
+                                                val userLocation = LatLng(state.currentLat, state.currentLon)
+                                                map.addMarker(
+                                                    MarkerOptions()
+                                                        .position(userLocation)
+                                                        .title("Minha Posição")
+                                                        .snippet("GPS Pulso: ${state.currentLat}, ${state.currentLon}")
+                                                )
 
-                        val styleBuilder = when {
-                            localStyle.exists() -> Style.Builder().fromUri("file://${localStyle.absolutePath}")
-                            localMbtiles.exists() -> Style.Builder().fromJson(OFFLINE_DARK_STYLE_JSON)
-                            else -> Style.Builder().fromJson(OFFLINE_DARK_STYLE_JSON)
-                        }
+                                                // Marcadores dos POIs salvos no Room
+                                                state.pois.forEach { poi ->
+                                                    map.addMarker(
+                                                        MarkerOptions()
+                                                            .position(LatLng(poi.latitude, poi.longitude))
+                                                            .title(poi.title)
+                                                            .snippet("${poi.type.name} • ${poi.address}")
+                                                    )
+                                                }
 
-                        map.setStyle(styleBuilder) {
-                            // Limpa e reinsere marcadores
-                            map.clear()
-
-                            // Marcador do Usuário (GPS Pulso)
-                            val userLocation = LatLng(state.currentLat, state.currentLon)
-                            map.addMarker(
-                                MarkerOptions()
-                                    .position(userLocation)
-                                    .title("Minha Posição (GPS Pulso)")
-                                    .snippet("Coordenadas: ${state.currentLat}, ${state.currentLon}")
-                            )
-
-                            // Marcadores dos POIs do banco
-                            state.pois.forEach { poi ->
-                                map.addMarker(
-                                    MarkerOptions()
-                                        .position(LatLng(poi.latitude, poi.longitude))
-                                        .title(poi.title)
-                                        .snippet("${poi.type.name} • ${poi.address}")
-                                )
+                                                val initialCamera = CameraPosition.Builder()
+                                                    .target(userLocation)
+                                                    .zoom(12.5)
+                                                    .build()
+                                                map.cameraPosition = initialCamera
+                                            } catch (e: Exception) {
+                                                Log.e(TAG, "Erro ao popular marcadores no mapa", e)
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Erro ao configurar estilo no MapLibre", e)
+                                    }
+                                }
+                                activeMapView = mv
+                                mv
+                            } catch (t: Throwable) {
+                                Log.e(TAG, "Exceção crítica ao criar MapView", t)
+                                mapInitError = t.localizedMessage ?: "Erro na GPU/OpenGL do dispositivo"
+                                View(ctx)
                             }
-
-                            // Posiciona câmera inicial
-                            val initialCamera = CameraPosition.Builder()
-                                .target(userLocation)
-                                .zoom(12.5)
-                                .build()
-                            map.cameraPosition = initialCamera
-                        }
-                    }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
 
-                // Tag sobreposta MapLibre Native
+                // Fallback tático elegante se a aceleração gráfica nativa falhar ou estiver em inicialização
+                if (mapInitError != null) {
+                    TacticalRadarFallback(
+                        currentLat = state.currentLat,
+                        currentLon = state.currentLon,
+                        navList = navList,
+                        errorMessage = mapInitError
+                    )
+                }
+
+                // Badge sobreposta de status
                 Row(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
@@ -370,11 +412,11 @@ fun OfflineMapScreen(
                         .padding(8.dp)
                 ) {
                     Surface(
-                        color = Color.Black.copy(alpha = 0.8f),
+                        color = Color.Black.copy(alpha = 0.85f),
                         shape = RoundedCornerShape(4.dp)
                     ) {
                         Text(
-                            text = "MapLibre Native SDK • Vetores Offline",
+                            text = if (mapInitError == null) "MapLibre Native SDK • Vetores Offline" else "Modo Tático Vetorial Ativo",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White,
@@ -383,7 +425,7 @@ fun OfflineMapScreen(
                     }
 
                     Surface(
-                        color = Color.Black.copy(alpha = 0.8f),
+                        color = Color.Black.copy(alpha = 0.85f),
                         shape = RoundedCornerShape(4.dp)
                     ) {
                         Text(
@@ -399,7 +441,7 @@ fun OfflineMapScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // --- 3. LISTA DE PONTOS DE ENCONTRO E APOIO COM ZOOM INTERATIVO ---
+        // --- 3. LISTA DE PONTOS DE ENCONTRO E APOIO COM FOCO INTERATIVO ---
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -428,18 +470,80 @@ fun OfflineMapScreen(
                     crisisMode = crisisMode,
                     onClick = {
                         selectedPoiId = nav.poiId
-                        // Anima câmera do mapa para o POI selecionado
                         val targetPoi = state.pois.find { it.id == nav.poiId }
                         if (targetPoi != null && mapLibreInstance != null) {
-                            val targetLocation = LatLng(targetPoi.latitude, targetPoi.longitude)
-                            mapLibreInstance?.animateCamera(
-                                CameraUpdateFactory.newLatLngZoom(targetLocation, 14.5),
-                                1000
-                            )
+                            try {
+                                val targetLocation = LatLng(targetPoi.latitude, targetPoi.longitude)
+                                mapLibreInstance?.animateCamera(
+                                    CameraUpdateFactory.newLatLngZoom(targetLocation, 14.5),
+                                    1000
+                                )
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Erro ao focar POI no mapa", e)
+                            }
                         }
                     }
                 )
             }
+        }
+    }
+}
+
+/**
+ * Radar Tático Vetorial: garante que mesmo em dispositivos com falha de OpenGL/Drivers
+ * ou ausência de sinal de mapa, o usuário tenha visualização tática de suas coordenadas e alvos.
+ */
+@Composable
+private fun TacticalRadarFallback(
+    currentLat: Double,
+    currentLon: Double,
+    navList: List<RationingAndAlertEngine.PoiNavigationInfo>,
+    errorMessage: String?
+) {
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF090D16))) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val center = Offset(w / 2, h / 2)
+
+            // Círculos concêntricos do radar tático
+            drawCircle(Color(0xFF1E293B), radius = h * 0.45f, center = center, style = Stroke(1f))
+            drawCircle(Color(0xFF1E293B), radius = h * 0.30f, center = center, style = Stroke(1f))
+            drawCircle(Color(0xFF1E293B), radius = h * 0.15f, center = center, style = Stroke(1f))
+
+            // Eixos cardeais N-S e L-O
+            drawLine(Color(0xFF1E293B), Offset(w / 2, 0f), Offset(w / 2, h), 1f)
+            drawLine(Color(0xFF1E293B), Offset(0f, h / 2), Offset(w, h / 2), 1f)
+
+            // Posição central do usuário
+            drawCircle(Color(0xFF0284C7).copy(alpha = 0.3f), radius = 18.dp.toPx(), center = center)
+            drawCircle(Color(0xFF38BDF8), radius = 5.dp.toPx(), center = center)
+
+            // Plota os POIs ao redor do radar baseados no azimute real
+            navList.take(5).forEachIndexed { index, poi ->
+                val angleRad = Math.toRadians(poi.bearingDegrees - 90.0)
+                val distNormalized = (poi.distanceMeters / 15000.0).coerceIn(0.2, 0.9)
+                val r = (h * 0.45f * distNormalized).toFloat()
+
+                val px = center.x + r * kotlin.math.cos(angleRad).toFloat()
+                val py = center.y + r * kotlin.math.sin(angleRad).toFloat()
+
+                val poiColor = if (poi.poiType.contains("Famili", true)) Color(0xFFF59E0B) else Color(0xFFEF4444)
+                drawCircle(poiColor, radius = 5.dp.toPx(), center = Offset(px, py))
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(8.dp)
+        ) {
+            Text(
+                text = "GPS: %.4f, %.4f".format(currentLat, currentLon),
+                fontSize = 10.sp,
+                color = Color(0xFF94A3B8),
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
