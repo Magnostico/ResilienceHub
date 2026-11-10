@@ -6,10 +6,12 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,6 +41,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.data.entity.MapPoiEntity
 import com.example.domain.RationingAndAlertEngine
 import com.example.ui.MainUiState
@@ -55,10 +59,10 @@ import kotlin.math.*
 
 /**
  * Motor Cartográfico Híbrido 100% Kotlin/Compose (Zero dependências C++ / Zero Crash):
- * 1. Projeção Web Mercator real com suporte a Pan (arrastar) e Zoom (níveis 10 a 17).
- * 2. Cache automático de Tiles OpenStreetMap em disco local (filesDir/osm_tiles/{z}/{x}/{y}.png).
- * 3. Cartografia Vetorial Offline Embutida do Rio de Janeiro (Orla, Lagoa, Baía de Guanabara,
- *    Maciço da Tijuca, corredores de evacuação e bairros) garantindo mapa visível mesmo sem internet.
+ * 1. Projeção Web Mercator real com suporte a Pan (arrastar), Zoom (10 a 17) e Modo Tela Cheia (100% Display).
+ * 2. Rastreio Vivo de Movimentação (GPS Live Tracking) com trilha de deslocamento (breadcrumb trail),
+ *    cone direcional de rumo (heading), velocidade em km/h e modo Auto-Seguir.
+ * 3. Cache automático de Tiles OpenStreetMap em disco local + Cartografia Vetorial Offline do Rio de Janeiro.
  */
 @Composable
 fun OfflineMapScreen(
@@ -79,14 +83,17 @@ fun OfflineMapScreen(
     // Estado da câmera do mapa (Web Mercator)
     var mapCenterLat by remember { mutableDoubleStateOf(state.currentLat) }
     var mapCenterLon by remember { mutableDoubleStateOf(state.currentLon) }
-    var mapZoom by remember { mutableIntStateOf(13) }
-    var isMapExpanded by remember { mutableStateOf(false) }
+    var mapZoom by remember { mutableIntStateOf(14) }
+    var isMapFullscreen by remember { mutableStateOf(false) }
+    var autoFollowUser by remember { mutableStateOf(true) }
     var showStreetTiles by remember { mutableStateOf(true) }
 
-    // Sincroniza quando o GPS Pulso atualiza a coordenada do usuário
+    // Quando o GPS atualiza a posição e o modo Auto-Seguir está ativo, move o centro do mapa junto com o usuário
     LaunchedEffect(state.currentLat, state.currentLon) {
-        mapCenterLat = state.currentLat
-        mapCenterLon = state.currentLon
+        if (autoFollowUser) {
+            mapCenterLat = state.currentLat
+            mapCenterLon = state.currentLon
+        }
     }
 
     // Cache em memória e status de download de tiles offline
@@ -97,376 +104,856 @@ fun OfflineMapScreen(
     var isPreloadingTiles by remember { mutableStateOf(false) }
     var preloadStatusText by remember { mutableStateOf<String?>(null) }
 
-    Column(
+    // Unificado em um único LazyColumn para scroll fluido de toda a tela
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 14.dp)
             .testTag("offline_map_screen")
     ) {
-        // --- 1. PAINEL BÚSSOLA & DISTÂNCIA DE EMERGÊNCIA (100% OFFLINE) ---
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surface
-            ),
-            shape = RoundedCornerShape(12.dp),
-            border = androidx.compose.foundation.BorderStroke(
-                1.dp,
-                if (crisisMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6.dp)
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.Explore,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                "Bússola & Mapa Offline",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
-                            )
-                        }
-                        Text(
-                            text = state.gpsProviderInfo,
-                            fontSize = 10.sp,
-                            color = Color(0xFF38BDF8),
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-
+        // --- 1. PAINEL BÚSSOLA, TELEMETRIA DE MOVIMENTO & CONTROLES GPS ---
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (state.isLiveTracking) Color(0xFF10B981)
+                    else if (crisisMode) MaterialTheme.colorScheme.primary
+                    else Color(0xFF334155)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    // Linha de Título + Botão Tela Cheia
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Explore,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFBBF24),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Navegação & Mapa Tático Offline",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 15.sp,
+                                    color = Color.White
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = state.gpsProviderInfo,
+                                fontSize = 11.sp,
+                                color = if (state.isLiveTracking) Color(0xFF34D399) else Color(0xFF38BDF8),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        FilledTonalButton(
+                            onClick = { isMapFullscreen = true },
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = Color(0xFF0284C7),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("btn_open_fullscreen_map")
+                        ) {
+                            Icon(
+                                Icons.Default.Fullscreen,
+                                contentDescription = "Abrir Mapa em Tela Cheia",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Tela Cheia", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Botões de Rastreio Vivo (Em Movimento) e GPS Pulso (1x)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Button(
                             onClick = {
+                                autoFollowUser = true
+                                viewModel.toggleLiveGpsTracking()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (state.isLiveTracking) Color(0xFF059669) else Color(0xFF1E293B),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1.2f)
+                                .testTag("btn_live_tracking_toggle")
+                        ) {
+                            Icon(
+                                if (state.isLiveTracking) Icons.Default.DirectionsRun else Icons.Default.LocationSearching,
+                                contentDescription = null,
+                                tint = if (state.isLiveTracking) Color.White else Color(0xFF34D399),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (state.isLiveTracking) "Rastreio Vivo: ON" else "Rastrear Movimento",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                autoFollowUser = true
                                 viewModel.triggerSingleShotGpsPulse()
                                 mapCenterLat = state.currentLat
                                 mapCenterLon = state.currentLon
                             },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.testTag("btn_gps_pulse_map")
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF59E0B),
+                                contentColor = Color(0xFF090D16)
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_gps_pulse_map")
                         ) {
-                            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("GPS Pulso", fontSize = 11.sp)
-                        }
-
-                        IconButton(
-                            onClick = { isMapExpanded = !isMapExpanded },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                if (isMapExpanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                                contentDescription = "Expandir Mapa",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
+                            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text("GPS Pulso (1x)", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                         }
                     }
-                }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                // Compass & Bearing Target Display
-                if (focusedPoi != null) {
+                    // Barra de Telemetria de Movimentação (Velocidade, Rumo, Pontos da Trilha)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(
-                                if (crisisMode) Color(0xFF0D0D0D) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                RoundedCornerShape(8.dp)
-                            )
-                            .padding(8.dp)
+                            .background(Color(0xFF090D16), RoundedCornerShape(8.dp))
+                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
                     ) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier.size(52.dp)
+                        TelemetryItem(
+                            label = "VELOCIDADE",
+                            value = String.format(Locale.US, "%.1f km/h", state.currentSpeedKmh),
+                            valueColor = Color(0xFF38BDF8)
+                        )
+                        TelemetryItem(
+                            label = "RUMO ATUAL",
+                            value = "${state.currentHeadingDegrees.toInt()}°",
+                            valueColor = Color(0xFFFBBF24)
+                        )
+                        TelemetryItem(
+                            label = "TRILHA GPS",
+                            value = "${state.movementTrail.size} pts",
+                            valueColor = Color(0xFF34D399)
+                        )
+                        TextButton(
+                            onClick = { viewModel.clearMovementTrail() },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(28.dp)
                         ) {
-                            Canvas(modifier = Modifier.size(52.dp)) {
-                                drawCircle(
-                                    color = if (crisisMode) Color(0xFF27272A) else Color.LightGray,
-                                    style = Stroke(width = 2.dp.toPx())
-                                )
-                                drawLine(
-                                    color = Color(0xFFEF4444),
-                                    start = Offset(size.width / 2, 3.dp.toPx()),
-                                    end = Offset(size.width / 2, 9.dp.toPx()),
-                                    strokeWidth = 2.dp.toPx()
-                                )
-                            }
-                            Icon(
-                                Icons.Default.Navigation,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .size(26.dp)
-                                    .rotate(focusedPoi.bearingDegrees.toFloat())
-                            )
-                        }
-
-                        Column(
-                            modifier = Modifier
-                                .padding(start = 10.dp)
-                                .weight(1f)
-                        ) {
-                            Text(
-                                text = "Rumo ao Alvo Selecionado:",
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = focusedPoi.poiTitle,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            val walkMinutes = (focusedPoi.distanceMeters / 75.0).roundToInt().coerceAtLeast(1)
-                            Text(
-                                text = "${focusedPoi.cardinalDetailed} • ${focusedPoi.bearingDegrees.toInt()}° (~$walkMinutes min a pé)",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                text = focusedPoi.distanceFormatted,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Black,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                text = "Haversine",
-                                fontSize = 9.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Text("Limpar Trilha", fontSize = 10.sp, color = Color(0xFFF87171), fontWeight = FontWeight.Bold)
                         }
                     }
-                }
-            }
-        }
 
-        // --- 2. MAPA INTERATIVO VETORIAL & RASTER OFFLINE (100% KOTLIN) ---
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = if (crisisMode) Color.Black else Color(0xFF070B14)
-            ),
-            shape = RoundedCornerShape(12.dp),
-            border = androidx.compose.foundation.BorderStroke(
-                1.5.dp,
-                if (crisisMode) MaterialTheme.colorScheme.primary else Color(0xFF0284C7)
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(if (isMapExpanded) 340.dp else 210.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(12.dp))
-            ) {
-                InteractiveOfflineMapCanvas(
-                    context = context,
-                    centerLat = mapCenterLat,
-                    centerLon = mapCenterLon,
-                    zoom = mapZoom,
-                    userLat = state.currentLat,
-                    userLon = state.currentLon,
-                    pois = state.pois,
-                    focusedPoi = focusedPoiEntity,
-                    crisisMode = crisisMode,
-                    showStreetTiles = showStreetTiles,
-                    tileBitmapCache = tileBitmapCache,
-                    onTileCached = { cachedTilesCount = countCachedTilesOnDisk(context) },
-                    onPanLatLon = { dLat, dLon ->
-                        mapCenterLat = (mapCenterLat + dLat).coerceIn(-23.15, -22.70)
-                        mapCenterLon = (mapCenterLon + dLon).coerceIn(-43.80, -42.95)
-                    }
-                )
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                // Barra Superior do Mapa: Status Offline + Botão Baixar Região
-                Row(
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp)
-                ) {
-                    Surface(
-                        color = Color.Black.copy(alpha = 0.82f),
-                        shape = RoundedCornerShape(6.dp)
-                    ) {
+                    // Painel da Bússola apontando para o Abrigo/Hospital focado
+                    if (focusedPoi != null) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF090D16), RoundedCornerShape(10.dp))
+                                .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                                .padding(10.dp)
                         ) {
                             Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .background(Color(0xFF10B981), CircleShape)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Mapa RJ • Zoom $mapZoom • $cachedTilesCount tiles salvos",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        // Alternar Camada Rua / Vetor Tático
-                        Surface(
-                            color = Color.Black.copy(alpha = 0.82f),
-                            shape = RoundedCornerShape(6.dp),
-                            modifier = Modifier.clickable { showStreetTiles = !showStreetTiles }
-                        ) {
-                            Text(
-                                text = if (showStreetTiles) "Ruas + Vetor" else "Só Vetor OLED",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF38BDF8),
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
-                        }
-
-                        // Pré-baixar tiles da região atual para uso 100% offline
-                        Surface(
-                            color = Color(0xFF0284C7).copy(alpha = 0.9f),
-                            shape = RoundedCornerShape(6.dp),
-                            modifier = Modifier.clickable(enabled = !isPreloadingTiles) {
-                                scope.launch {
-                                    isPreloadingTiles = true
-                                    preloadStatusText = "Baixando mapa local..."
-                                    val downloaded = preloadRegionTiles(
-                                        context = context,
-                                        centerLat = mapCenterLat,
-                                        centerLon = mapCenterLon,
-                                        zoom = mapZoom,
-                                        cache = tileBitmapCache
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.size(54.dp)
+                            ) {
+                                Canvas(modifier = Modifier.size(54.dp)) {
+                                    drawCircle(
+                                        color = Color(0xFF334155),
+                                        style = Stroke(width = 2.dp.toPx())
                                     )
-                                    cachedTilesCount = countCachedTilesOnDisk(context)
-                                    preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos salvos offline" else "✓ Região em cache"
-                                    isPreloadingTiles = false
+                                    drawLine(
+                                        color = Color(0xFFEF4444),
+                                        start = Offset(size.width / 2, 3.dp.toPx()),
+                                        end = Offset(size.width / 2, 10.dp.toPx()),
+                                        strokeWidth = 2.5.dp.toPx()
+                                    )
                                 }
+                                Icon(
+                                    Icons.Default.Navigation,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFBBF24),
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .rotate(focusedPoi.bearingDegrees.toFloat())
+                                )
                             }
-                        ) {
-                            Text(
-                                text = if (isPreloadingTiles) "Salvando..." else "⬇ Salvar Offline",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                }
 
-                // Controles Flutuantes de Zoom (+ / - / Centralizar GPS) à direita
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .padding(end = 8.dp)
-                ) {
-                    SmallFloatingButton(
-                        icon = Icons.Default.Add,
-                        contentDescription = "Mais Zoom",
-                        onClick = { if (mapZoom < 17) mapZoom++ }
-                    )
-                    SmallFloatingButton(
-                        icon = Icons.Default.Remove,
-                        contentDescription = "Menos Zoom",
-                        onClick = { if (mapZoom > 10) mapZoom-- }
-                    )
-                    SmallFloatingButton(
-                        icon = Icons.Default.MyLocation,
-                        contentDescription = "Centralizar no Usuário",
-                        tint = Color(0xFF38BDF8),
-                        onClick = {
-                            mapCenterLat = state.currentLat
-                            mapCenterLon = state.currentLon
-                            mapZoom = 14
-                        }
-                    )
-                }
+                            Column(
+                                modifier = Modifier
+                                    .padding(start = 10.dp)
+                                    .weight(1f)
+                            ) {
+                                Text(
+                                    text = "DESTINO SELECIONADO:",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF94A3B8)
+                                )
+                                Text(
+                                    text = focusedPoi.poiTitle,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    color = Color.White
+                                )
+                                val walkMinutes = (focusedPoi.distanceMeters / 75.0).roundToInt().coerceAtLeast(1)
+                                Text(
+                                    text = "${focusedPoi.cardinalDetailed} • Azimute ${focusedPoi.bearingDegrees.toInt()}° (~$walkMinutes min a pé)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFFBBF24)
+                                )
+                            }
 
-                // Rodapé do Mapa: Coordenadas e Legenda
-                Row(
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.72f))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text = preloadStatusText ?: String.format(Locale.US, "Centro: %.4f, %.4f (Arraste para mover)", mapCenterLat, mapCenterLon),
-                        fontSize = 9.sp,
-                        color = Color(0xFFCBD5E1)
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        LegendDot(color = Color(0xFF38BDF8), label = "Você")
-                        LegendDot(color = Color(0xFFF59E0B), label = "Encontro")
-                        LegendDot(color = Color(0xFFEF4444), label = "Hospital/BM")
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    text = focusedPoi.distanceFormatted,
+                                    fontSize = 19.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color(0xFF38BDF8)
+                                )
+                                Text(
+                                    text = "Linha Direta",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFFCBD5E1)
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // --- 3. LISTA DE PONTOS DE ENCONTRO E APOIO COM FOCO NO MAPA ---
-        Text(
-            text = "Pontos Seguros e Abrigos (Toque para focar no mapa):",
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 4.dp)
-        )
-
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(bottom = 80.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            items(navList, key = { it.poiId }) { nav ->
-                val isSelected = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
-                PoiOfflineCard(
-                    nav = nav,
-                    isSelected = isSelected,
-                    crisisMode = crisisMode,
-                    onClick = {
-                        selectedPoiId = nav.poiId
-                        val targetPoi = state.pois.find { it.id == nav.poiId }
-                        if (targetPoi != null) {
-                            mapCenterLat = targetPoi.latitude
-                            mapCenterLon = targetPoi.longitude
-                            if (mapZoom < 14) mapZoom = 14
+        // --- 2. PRÉVIA INTERATIVA DO MAPA COM BOTÃO DE TELA CHEIA ---
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF070B14)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.5.dp,
+                    if (state.isLiveTracking) Color(0xFF10B981) else Color(0xFF0284C7)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(290.dp)
+            ) {
+                MapViewportBox(
+                    context = context,
+                    state = state,
+                    mapCenterLat = mapCenterLat,
+                    mapCenterLon = mapCenterLon,
+                    mapZoom = mapZoom,
+                    autoFollowUser = autoFollowUser,
+                    showStreetTiles = showStreetTiles,
+                    isFullscreen = false,
+                    focusedPoiEntity = focusedPoiEntity,
+                    tileBitmapCache = tileBitmapCache,
+                    cachedTilesCount = cachedTilesCount,
+                    isPreloadingTiles = isPreloadingTiles,
+                    preloadStatusText = preloadStatusText,
+                    onUpdateCachedCount = { cachedTilesCount = countCachedTilesOnDisk(context) },
+                    onPanMap = { dLat, dLon ->
+                        autoFollowUser = false
+                        mapCenterLat = (mapCenterLat + dLat).coerceIn(-23.15, -22.70)
+                        mapCenterLon = (mapCenterLon + dLon).coerceIn(-43.80, -42.95)
+                    },
+                    onZoomChange = { newZoom -> mapZoom = newZoom.coerceIn(10, 17) },
+                    onCenterUser = {
+                        autoFollowUser = true
+                        mapCenterLat = state.currentLat
+                        mapCenterLon = state.currentLon
+                        if (mapZoom < 15) mapZoom = 15
+                    },
+                    onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
+                    onToggleFullscreen = { isMapFullscreen = true },
+                    onPreloadTiles = {
+                        scope.launch {
+                            isPreloadingTiles = true
+                            preloadStatusText = "Baixando mapa local..."
+                            val downloaded = preloadRegionTiles(
+                                context = context,
+                                centerLat = mapCenterLat,
+                                centerLon = mapCenterLon,
+                                zoom = mapZoom,
+                                cache = tileBitmapCache
+                            )
+                            cachedTilesCount = countCachedTilesOnDisk(context)
+                            preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos salvos offline" else "✓ Região já salva offline"
+                            isPreloadingTiles = false
                         }
                     }
                 )
+            }
+        }
+
+        // --- 3. CABEÇALHO DA LISTA DE PONTOS DE APOIO ---
+        item {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+            ) {
+                Text(
+                    text = "Pontos Seguros e Abrigos (${navList.size}):",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White
+                )
+                TextButton(
+                    onClick = onOpenAddPoiDialog,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Icon(Icons.Default.AddLocationAlt, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Novo Ponto", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                }
+            }
+        }
+
+        // --- 4. LISTA DE PONTOS DE ENCONTRO E APOIO ---
+        items(navList, key = { it.poiId }) { nav ->
+            val isSelected = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
+            PoiOfflineCard(
+                nav = nav,
+                isSelected = isSelected,
+                crisisMode = crisisMode,
+                onClick = {
+                    selectedPoiId = nav.poiId
+                    val targetPoi = state.pois.find { it.id == nav.poiId }
+                    if (targetPoi != null) {
+                        autoFollowUser = false
+                        mapCenterLat = targetPoi.latitude
+                        mapCenterLon = targetPoi.longitude
+                        if (mapZoom < 14) mapZoom = 14
+                    }
+                }
+            )
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(76.dp))
+        }
+    }
+
+    // =========================================================================
+    // MODAL DE MAPA EM TELA CHEIA (100% DA TELA COM HUD TÁTICO E RASTREIO VIVO)
+    // =========================================================================
+    if (isMapFullscreen) {
+        Dialog(
+            onDismissRequest = { isMapFullscreen = false },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
+            Surface(
+                color = Color(0xFF050811),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("fullscreen_map_dialog")
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    MapViewportBox(
+                        context = context,
+                        state = state,
+                        mapCenterLat = mapCenterLat,
+                        mapCenterLon = mapCenterLon,
+                        mapZoom = mapZoom,
+                        autoFollowUser = autoFollowUser,
+                        showStreetTiles = showStreetTiles,
+                        isFullscreen = true,
+                        focusedPoiEntity = focusedPoiEntity,
+                        tileBitmapCache = tileBitmapCache,
+                        cachedTilesCount = cachedTilesCount,
+                        isPreloadingTiles = isPreloadingTiles,
+                        preloadStatusText = preloadStatusText,
+                        onUpdateCachedCount = { cachedTilesCount = countCachedTilesOnDisk(context) },
+                        onPanMap = { dLat, dLon ->
+                            autoFollowUser = false
+                            mapCenterLat = (mapCenterLat + dLat).coerceIn(-23.15, -22.70)
+                            mapCenterLon = (mapCenterLon + dLon).coerceIn(-43.80, -42.95)
+                        },
+                        onZoomChange = { newZoom -> mapZoom = newZoom.coerceIn(10, 17) },
+                        onCenterUser = {
+                            autoFollowUser = true
+                            mapCenterLat = state.currentLat
+                            mapCenterLon = state.currentLon
+                            if (mapZoom < 15) mapZoom = 15
+                        },
+                        onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
+                        onToggleFullscreen = { isMapFullscreen = false },
+                        onPreloadTiles = {
+                            scope.launch {
+                                isPreloadingTiles = true
+                                preloadStatusText = "Baixando mapa local..."
+                                val downloaded = preloadRegionTiles(
+                                    context = context,
+                                    centerLat = mapCenterLat,
+                                    centerLon = mapCenterLon,
+                                    zoom = mapZoom,
+                                    cache = tileBitmapCache
+                                )
+                                cachedTilesCount = countCachedTilesOnDisk(context)
+                                preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos salvos offline" else "✓ Região em cache"
+                                isPreloadingTiles = false
+                            }
+                        }
+                    )
+
+                    // HUD Tático Superior em Tela Cheia (Bússola + Velocidade + Botão Fechar)
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF090D16).copy(alpha = 0.92f)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 36.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    if (focusedPoi != null) {
+                                        Icon(
+                                            Icons.Default.Navigation,
+                                            contentDescription = null,
+                                            tint = Color(0xFFFBBF24),
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .rotate(focusedPoi.bearingDegrees.toFloat())
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column {
+                                            Text(
+                                                text = "${focusedPoi.poiTitle} • ${focusedPoi.distanceFormatted}",
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 13.sp,
+                                                color = Color.White,
+                                                maxLines = 1
+                                            )
+                                            Text(
+                                                text = "Azimute ${focusedPoi.bearingDegrees.toInt()}° (${focusedPoi.cardinalDetailed}) • Vel: ${String.format(Locale.US, "%.1f km/h", state.currentSpeedKmh)}",
+                                                fontSize = 11.sp,
+                                                color = Color(0xFF38BDF8),
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Button(
+                                    onClick = { isMapFullscreen = false },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFFDC2626),
+                                        contentColor = Color.White
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.FullscreenExit, contentDescription = "Fechar Tela Cheia", modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Sair", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Barra Rápida de Rastreio Vivo dentro da Tela Cheia
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Button(
+                                    onClick = {
+                                        autoFollowUser = true
+                                        viewModel.toggleLiveGpsTracking()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (state.isLiveTracking) Color(0xFF059669) else Color(0xFF1E293B),
+                                        contentColor = Color.White
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(
+                                        if (state.isLiveTracking) Icons.Default.DirectionsRun else Icons.Default.LocationSearching,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (state.isLiveTracking) "Rastreio Vivo: ON" else "Iniciar Rastreio",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        autoFollowUser = !autoFollowUser
+                                        if (autoFollowUser) {
+                                            mapCenterLat = state.currentLat
+                                            mapCenterLon = state.currentLon
+                                        }
+                                    },
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        if (autoFollowUser) Color(0xFF38BDF8) else Color(0xFF475569)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.GpsFixed,
+                                        contentDescription = null,
+                                        tint = if (autoFollowUser) Color(0xFF38BDF8) else Color(0xFF94A3B8),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (autoFollowUser) "Auto-Seguir: ON" else "Livre (Arrastar)",
+                                        fontSize = 11.sp,
+                                        color = Color.White
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Carrossel Inferior de POIs em Tela Cheia para troca rápida de alvo
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .padding(bottom = 28.dp)
+                    ) {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            items(navList, key = { it.poiId }) { nav ->
+                                val isSel = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
+                                Surface(
+                                    color = if (isSel) Color(0xFF0F2942) else Color(0xFF090D16).copy(alpha = 0.92f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        if (isSel) 2.dp else 1.dp,
+                                        if (isSel) Color(0xFFFBBF24) else Color(0xFF334155)
+                                    ),
+                                    modifier = Modifier
+                                        .width(220.dp)
+                                        .clickable {
+                                            selectedPoiId = nav.poiId
+                                            val target = state.pois.find { it.id == nav.poiId }
+                                            if (target != null) {
+                                                autoFollowUser = false
+                                                mapCenterLat = target.latitude
+                                                mapCenterLon = target.longitude
+                                            }
+                                        }
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(
+                                                text = nav.poiTitle,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp,
+                                                color = Color.White,
+                                                maxLines = 1,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = nav.distanceFormatted,
+                                                fontWeight = FontWeight.Black,
+                                                fontSize = 12.sp,
+                                                color = Color(0xFFFBBF24)
+                                            )
+                                        }
+                                        Text(
+                                            text = "${nav.cardinalDetailed} (${nav.bearingDegrees.toInt()}°) • ${nav.poiType}",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFF38BDF8),
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TelemetryItem(
+    label: String,
+    value: String,
+    valueColor: Color
+) {
+    Column(horizontalAlignment = Alignment.Start) {
+        Text(
+            text = label,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF94A3B8)
+        )
+        Text(
+            text = value,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = valueColor
+        )
+    }
+}
+
+@Composable
+private fun MapViewportBox(
+    context: Context,
+    state: MainUiState,
+    mapCenterLat: Double,
+    mapCenterLon: Double,
+    mapZoom: Int,
+    autoFollowUser: Boolean,
+    showStreetTiles: Boolean,
+    isFullscreen: Boolean,
+    focusedPoiEntity: MapPoiEntity?,
+    tileBitmapCache: MutableMap<String, ImageBitmap>,
+    cachedTilesCount: Int,
+    isPreloadingTiles: Boolean,
+    preloadStatusText: String?,
+    onUpdateCachedCount: () -> Unit,
+    onPanMap: (dLat: Double, dLon: Double) -> Unit,
+    onZoomChange: (Int) -> Unit,
+    onCenterUser: () -> Unit,
+    onToggleStreetTiles: () -> Unit,
+    onToggleFullscreen: () -> Unit,
+    onPreloadTiles: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(if (isFullscreen) RoundedCornerShape(0.dp) else RoundedCornerShape(14.dp))
+    ) {
+        InteractiveOfflineMapCanvas(
+            context = context,
+            centerLat = mapCenterLat,
+            centerLon = mapCenterLon,
+            zoom = mapZoom,
+            userLat = state.currentLat,
+            userLon = state.currentLon,
+            userHeadingDegrees = state.currentHeadingDegrees,
+            userAccuracyMeters = state.currentAccuracyMeters,
+            isLiveTracking = state.isLiveTracking,
+            movementTrail = state.movementTrail,
+            pois = state.pois,
+            focusedPoi = focusedPoiEntity,
+            crisisMode = state.crisisMode,
+            showStreetTiles = showStreetTiles,
+            tileBitmapCache = tileBitmapCache,
+            onTileCached = onUpdateCachedCount,
+            onPanLatLon = onPanMap
+        )
+
+        // Barra Superior do Mapa (Apenas na visualização normal, pois a tela cheia tem HUD dedicado)
+        if (!isFullscreen) {
+            Row(
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            ) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.85f),
+                    shape = RoundedCornerShape(6.dp),
+                    border = androidx.compose.foundation.BorderStroke(0.5.dp, Color(0xFF334155))
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .background(
+                                    if (state.isLiveTracking) Color(0xFF10B981) else Color(0xFF38BDF8),
+                                    CircleShape
+                                )
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Zoom $mapZoom • $cachedTilesCount blocos salvos",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.85f),
+                        shape = RoundedCornerShape(6.dp),
+                        border = androidx.compose.foundation.BorderStroke(0.5.dp, Color(0xFF38BDF8)),
+                        modifier = Modifier.clickable { onToggleStreetTiles() }
+                    ) {
+                        Text(
+                            text = if (showStreetTiles) "Ruas + Vetor" else "Só Vetor OLED",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF38BDF8),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+
+                    Surface(
+                        color = Color(0xFF0284C7),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.clickable(enabled = !isPreloadingTiles) { onPreloadTiles() }
+                    ) {
+                        Text(
+                            text = if (isPreloadingTiles) "Salvando..." else "⬇ Salvar Offline",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Controles Flutuantes Laterais (+ / - / Centralizar / Tela Cheia / Camada)
+        Column(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 10.dp)
+        ) {
+            SmallFloatingButton(
+                icon = Icons.Default.Add,
+                contentDescription = "Mais Zoom",
+                onClick = { onZoomChange(mapZoom + 1) }
+            )
+            SmallFloatingButton(
+                icon = Icons.Default.Remove,
+                contentDescription = "Menos Zoom",
+                onClick = { onZoomChange(mapZoom - 1) }
+            )
+            SmallFloatingButton(
+                icon = if (autoFollowUser) Icons.Default.GpsFixed else Icons.Default.MyLocation,
+                contentDescription = "Centralizar e Seguir Você",
+                tint = if (autoFollowUser) Color(0xFF34D399) else Color(0xFF38BDF8),
+                onClick = onCenterUser
+            )
+            if (isFullscreen) {
+                SmallFloatingButton(
+                    icon = Icons.Default.Layers,
+                    contentDescription = "Alternar Camada",
+                    tint = Color(0xFFFBBF24),
+                    onClick = onToggleStreetTiles
+                )
+                SmallFloatingButton(
+                    icon = Icons.Default.Download,
+                    contentDescription = "Salvar Região Offline",
+                    tint = Color(0xFF38BDF8),
+                    onClick = onPreloadTiles
+                )
+            } else {
+                SmallFloatingButton(
+                    icon = Icons.Default.Fullscreen,
+                    contentDescription = "Tela Cheia",
+                    tint = Color(0xFFFBBF24),
+                    onClick = onToggleFullscreen
+                )
+            }
+        }
+
+        // Rodapé do Mapa: Coordenadas e Legenda (no modo normal)
+        if (!isFullscreen) {
+            Row(
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.80f))
+                    .padding(horizontal = 8.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = preloadStatusText
+                        ?: String.format(Locale.US, "Você: %.4f, %.4f (Arraste o mapa)", state.currentLat, state.currentLon),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    LegendDot(color = Color(0xFF38BDF8), label = "Você/Trilha")
+                    LegendDot(color = Color(0xFFF59E0B), label = "Encontro")
+                    LegendDot(color = Color(0xFFEF4444), label = "Hospital")
+                }
             }
         }
     }
@@ -480,15 +967,15 @@ private fun SmallFloatingButton(
     onClick: () -> Unit
 ) {
     Surface(
-        color = Color.Black.copy(alpha = 0.82f),
-        shape = RoundedCornerShape(8.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
+        color = Color(0xFF090D16).copy(alpha = 0.90f),
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF475569)),
         modifier = Modifier
-            .size(32.dp)
+            .size(38.dp)
             .clickable(onClick = onClick)
     ) {
         Box(contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(18.dp))
+            Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(20.dp))
         }
     }
 }
@@ -498,17 +985,18 @@ private fun LegendDot(color: Color, label: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
             modifier = Modifier
-                .size(6.dp)
+                .size(7.dp)
                 .background(color, CircleShape)
         )
-        Spacer(modifier = Modifier.width(3.dp))
-        Text(text = label, fontSize = 9.sp, color = Color.LightGray)
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(text = label, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFE2E8F0))
     }
 }
 
 /**
  * Renderizador Cartográfico Web Mercator em Compose Canvas:
- * Combina tiles OpenStreetMap cacheados localmente com vetores geográficos do Rio de Janeiro.
+ * Combina tiles OpenStreetMap cacheados localmente com vetores geográficos do Rio de Janeiro,
+ * trilha de movimentação em tempo real (breadcrumb trail) e cone direcional de rumo.
  */
 @Composable
 private fun InteractiveOfflineMapCanvas(
@@ -518,6 +1006,10 @@ private fun InteractiveOfflineMapCanvas(
     zoom: Int,
     userLat: Double,
     userLon: Double,
+    userHeadingDegrees: Float,
+    userAccuracyMeters: Float,
+    isLiveTracking: Boolean,
+    movementTrail: List<Pair<Double, Double>>,
     pois: List<MapPoiEntity>,
     focusedPoi: MapPoiEntity?,
     crisisMode: Boolean,
@@ -548,7 +1040,7 @@ private fun InteractiveOfflineMapCanvas(
         val maxTile = n.toInt() - 1
 
         for (dx in -2..2) {
-            for (dy in -1..1) {
+            for (dy in -2..2) {
                 val tx = (centerTileX + dx).coerceIn(0, maxTile)
                 val ty = (centerTileY + dy).coerceIn(0, maxTile)
                 val key = "$zoom/$tx/$ty"
@@ -597,7 +1089,6 @@ private fun InteractiveOfflineMapCanvas(
 
     val arterialRoads = remember {
         listOf(
-            // Aterro do Flamengo -> Botafogo -> Túnel Novo -> Copacabana
             listOf(
                 -22.9100 to -43.1720,
                 -22.9300 to -43.1735,
@@ -605,21 +1096,18 @@ private fun InteractiveOfflineMapCanvas(
                 -22.9650 to -43.1800,
                 -22.9830 to -43.1920
             ),
-            // Corredor Túnel Rebouças (Lagoa <-> Rio Comprido / Tijuca / Centro)
             listOf(
                 -22.9780 to -43.2150,
                 -22.9610 to -43.2090,
                 -22.9310 to -43.2060,
                 -22.9120 to -43.2100
             ),
-            // Av. Presidente Vargas -> Maracanã -> Tijuca
             listOf(
                 -22.9015 to -43.1780,
                 -22.9070 to -43.2050,
                 -22.9130 to -43.2280,
                 -22.9245 to -43.2325
             ),
-            // Jardim Botânico -> Gávea -> Humaitá -> Laranjeiras
             listOf(
                 -22.9760 to -43.2290,
                 -22.9665 to -43.2230,
@@ -674,8 +1162,8 @@ private fun InteractiveOfflineMapCanvas(
             val centerTileY = (centerWorldY / tileSize).toInt()
             val maxTile = n.toInt() - 1
 
-            for (dx in -2..2) {
-                for (dy in -2..2) {
+            for (dx in -3..3) {
+                for (dy in -3..3) {
                     val tx = centerTileX + dx
                     val ty = centerTileY + dy
                     if (tx in 0..maxTile && ty in 0..maxTile) {
@@ -688,7 +1176,7 @@ private fun InteractiveOfflineMapCanvas(
                                 image = bmp,
                                 dstOffset = IntOffset(tileScreenX, tileScreenY),
                                 dstSize = IntSize(tileSize.roundToInt() + 1, tileSize.roundToInt() + 1),
-                                alpha = if (crisisMode) 0.45f else 0.78f
+                                alpha = if (crisisMode) 0.50f else 0.85f
                             )
                         }
                     }
@@ -767,11 +1255,12 @@ private fun InteractiveOfflineMapCanvas(
 
         // Rótulos de Bairros do Rio de Janeiro
         val labelPaint = Paint().apply {
-            color = android.graphics.Color.argb(170, 148, 163, 184)
-            textSize = 9.sp.toPx()
+            color = android.graphics.Color.argb(190, 203, 213, 225)
+            textSize = 10.sp.toPx()
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
             isAntiAlias = true
+            setShadowLayer(3f, 0f, 1f, android.graphics.Color.BLACK)
         }
         neighborhoods.forEach { (name, lat, lon) ->
             val pt = toScreen(lat, lon)
@@ -780,26 +1269,58 @@ private fun InteractiveOfflineMapCanvas(
             }
         }
 
-        // 4. Vetor Direto de Rota Haversine entre Usuário e o POI Selecionado
+        // 4. TRILHA DE MOVIMENTAÇÃO DO USUÁRIO (BREADCRUMB TRAIL)
+        if (movementTrail.size >= 2) {
+            val trailPath = Path()
+            movementTrail.forEachIndexed { index, (tLat, tLon) ->
+                val pt = toScreen(tLat, tLon)
+                if (index == 0) trailPath.moveTo(pt.x, pt.y) else trailPath.lineTo(pt.x, pt.y)
+            }
+            // Sombra luminosa da trilha
+            drawPath(
+                path = trailPath,
+                color = Color(0xFF0284C7).copy(alpha = 0.45f),
+                style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+            // Linha principal da trilha percorrida
+            drawPath(
+                path = trailPath,
+                color = Color(0xFF38BDF8),
+                style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+            // Pontos históricos (breadcrumbs)
+            movementTrail.forEach { (tLat, tLon) ->
+                val pt = toScreen(tLat, tLon)
+                if (pt.x in 0f..w && pt.y in 0f..h) {
+                    drawCircle(
+                        color = Color.White,
+                        radius = 2.5.dp.toPx(),
+                        center = pt
+                    )
+                }
+            }
+        }
+
+        // 5. Vetor Direto de Rota Haversine entre Usuário e o POI Selecionado
         val userScreen = toScreen(userLat, userLon)
         if (focusedPoi != null) {
             val targetScreen = toScreen(focusedPoi.latitude, focusedPoi.longitude)
             drawLine(
-                color = Color(0xFFF59E0B),
+                color = Color(0xFFFBBF24),
                 start = userScreen,
                 end = targetScreen,
-                strokeWidth = 2.5.dp.toPx(),
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
+                strokeWidth = 2.8.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(16f, 10f), 0f)
             )
         }
 
-        // 5. Marcadores Geográficos de todos os POIs do Banco Room
+        // 6. Marcadores Geográficos de todos os POIs do Banco Room
         val poiLabelPaint = Paint().apply {
             color = android.graphics.Color.WHITE
-            textSize = 10.sp.toPx()
+            textSize = 11.sp.toPx()
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             isAntiAlias = true
-            setShadowLayer(4f, 0f, 1f, android.graphics.Color.BLACK)
+            setShadowLayer(5f, 0f, 1f, android.graphics.Color.BLACK)
         }
 
         pois.forEach { poi ->
@@ -815,46 +1336,75 @@ private fun InteractiveOfflineMapCanvas(
                 if (isFocused) {
                     drawCircle(
                         color = pinColor.copy(alpha = 0.35f),
-                        radius = 16.dp.toPx(),
+                        radius = 18.dp.toPx(),
                         center = pt
                     )
                 }
                 drawCircle(
                     color = Color.Black,
-                    radius = if (isFocused) 8.dp.toPx() else 6.dp.toPx(),
+                    radius = if (isFocused) 9.dp.toPx() else 7.dp.toPx(),
                     center = pt
                 )
                 drawCircle(
                     color = pinColor,
-                    radius = if (isFocused) 6.5.dp.toPx() else 4.5.dp.toPx(),
+                    radius = if (isFocused) 7.dp.toPx() else 5.dp.toPx(),
                     center = pt
                 )
 
-                val shortLabel = poi.title.substringBefore(" -").take(18)
+                val shortLabel = poi.title.substringBefore(" -").take(20)
                 drawContext.canvas.nativeCanvas.drawText(
                     shortLabel,
-                    pt.x + 10.dp.toPx(),
+                    pt.x + 11.dp.toPx(),
                     pt.y + 4.dp.toPx(),
                     poiLabelPaint
                 )
             }
         }
 
-        // 6. Pino da Posição Atual do Usuário (GPS Pulso)
-        if (userScreen.x in -50f..(w + 50f) && userScreen.y in -50f..(h + 50f)) {
+        // 7. Pino da Posição Atual do Usuário + Cone de Direção de Movimento
+        if (userScreen.x in -60f..(w + 60f) && userScreen.y in -60f..(h + 60f)) {
+            // Halo de precisão / rastreio ativo
             drawCircle(
-                color = Color(0xFF0284C7).copy(alpha = 0.30f),
-                radius = 20.dp.toPx(),
+                color = if (isLiveTracking) Color(0xFF10B981).copy(alpha = 0.28f) else Color(0xFF0284C7).copy(alpha = 0.28f),
+                radius = if (userAccuracyMeters > 0f) userAccuracyMeters.coerceIn(18f, 42f).dp.toPx() else 22.dp.toPx(),
                 center = userScreen
             )
+
+            // Cone / Seta indicando para onde o usuário está se movendo
+            val headingRad = Math.toRadians((userHeadingDegrees - 90f).toDouble())
+            val tipLength = 22.dp.toPx()
+            val tipX = userScreen.x + (cos(headingRad) * tipLength).toFloat()
+            val tipY = userScreen.y + (sin(headingRad) * tipLength).toFloat()
+
+            val leftWingRad = Math.toRadians((userHeadingDegrees - 90f - 28f).toDouble())
+            val rightWingRad = Math.toRadians((userHeadingDegrees - 90f + 28f).toDouble())
+            val wingLen = 11.dp.toPx()
+
+            val conePath = Path().apply {
+                moveTo(tipX, tipY)
+                lineTo(
+                    userScreen.x + (cos(leftWingRad) * wingLen).toFloat(),
+                    userScreen.y + (sin(leftWingRad) * wingLen).toFloat()
+                )
+                lineTo(
+                    userScreen.x + (cos(rightWingRad) * wingLen).toFloat(),
+                    userScreen.y + (sin(rightWingRad) * wingLen).toFloat()
+                )
+                close()
+            }
+            drawPath(
+                path = conePath,
+                color = if (isLiveTracking) Color(0xFF34D399) else Color(0xFF38BDF8)
+            )
+
             drawCircle(
                 color = Color.White,
-                radius = 7.dp.toPx(),
+                radius = 8.dp.toPx(),
                 center = userScreen
             )
             drawCircle(
-                color = Color(0xFF38BDF8),
-                radius = 5.dp.toPx(),
+                color = if (isLiveTracking) Color(0xFF10B981) else Color(0xFF0284C7),
+                radius = 5.5.dp.toPx(),
                 center = userScreen
             )
         }
@@ -896,7 +1446,6 @@ private fun loadOrDownloadTile(
         }
         null
     } catch (_: Exception) {
-        // Sem internet no momento: opera silenciosamente com a camada vetorial offline e tiles já salvos
         null
     }
 }
@@ -953,20 +1502,20 @@ fun PoiOfflineCard(
     val isFire = nav.poiType.contains("Bombeiro", ignoreCase = true)
 
     val badgeColor = when {
-        isFamily -> Color(0xFFF59E0B)
-        isHospital -> Color(0xFFEF4444)
-        isFire -> Color(0xFF0284C7)
-        else -> Color(0xFF10B981)
+        isFamily -> Color(0xFFFBBF24)
+        isHospital -> Color(0xFFF87171)
+        isFire -> Color(0xFF38BDF8)
+        else -> Color(0xFF34D399)
     }
 
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surface
+            containerColor = if (crisisMode) Color.Black else if (isSelected) Color(0xFF17253B) else Color(0xFF111827)
         ),
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(12.dp),
         border = androidx.compose.foundation.BorderStroke(
             if (isSelected) 2.dp else 1.dp,
-            if (isSelected) MaterialTheme.colorScheme.primary else if (crisisMode) Color(0xFF27272A) else MaterialTheme.colorScheme.outlineVariant
+            if (isSelected) Color(0xFFFBBF24) else Color(0xFF334155)
         ),
         modifier = Modifier
             .fillMaxWidth()
@@ -980,15 +1529,15 @@ fun PoiOfflineCard(
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(36.dp)
-                    .background(badgeColor.copy(alpha = 0.15f), CircleShape)
+                    .size(40.dp)
+                    .background(badgeColor.copy(alpha = 0.18f), CircleShape)
             ) {
                 Icon(
                     Icons.Default.Navigation,
                     contentDescription = null,
                     tint = badgeColor,
                     modifier = Modifier
-                        .size(20.dp)
+                        .size(22.dp)
                         .rotate(nav.bearingDegrees.toFloat())
                 )
             }
@@ -998,15 +1547,15 @@ fun PoiOfflineCard(
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(
-                        color = badgeColor.copy(alpha = 0.2f),
+                        color = badgeColor.copy(alpha = 0.22f),
                         shape = RoundedCornerShape(4.dp)
                     ) {
                         Text(
                             text = nav.poiType,
                             color = badgeColor,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
                     Spacer(modifier = Modifier.width(6.dp))
@@ -1014,39 +1563,39 @@ fun PoiOfflineCard(
                         text = "${nav.cardinalDetailed} (${nav.bearingDegrees.toInt()}°)",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
+                        color = Color(0xFFFBBF24)
                     )
                 }
 
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(3.dp))
 
                 Text(
                     text = nav.poiTitle,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurface
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 14.sp,
+                    color = Color.White
                 )
 
                 Text(
                     text = nav.address,
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     maxLines = 1,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = Color(0xFFCBD5E1)
                 )
             }
 
             Column(horizontalAlignment = Alignment.End) {
                 Text(
                     text = nav.distanceFormatted,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 16.sp,
-                    color = if (isFamily) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                    fontWeight = FontWeight.Black,
+                    fontSize = 17.sp,
+                    color = if (isFamily) Color(0xFFFBBF24) else Color.White
                 )
                 if (nav.phone != null) {
                     Text(
                         text = nav.phone,
-                        fontSize = 10.sp,
-                        color = Color(0xFF0284C7),
+                        fontSize = 11.sp,
+                        color = Color(0xFF38BDF8),
                         fontWeight = FontWeight.Bold
                     )
                 }

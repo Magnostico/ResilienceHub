@@ -3,8 +3,7 @@ package com.example.ui.components
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -21,7 +20,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.data.entity.ManualChunkFtsEntity
 import com.example.ui.MainUiState
 import com.example.ui.MainViewModel
 
@@ -47,218 +45,293 @@ fun ManualsAiScreen(
         uri?.let { viewModel.importModelFromUri(it) }
     }
 
-    Column(
+    // Tela inteira unificada em um único LazyColumn para scroll fluido sem comprimir os resultados
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 88.dp),
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 14.dp)
             .testTag("manuals_ai_screen")
     ) {
         // --- 1. AÇÕES DO TOPO: IMPORTAÇÃO DE PDF, MODELO IA & SWITCH MODO IA LOCAL ---
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6.dp)
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                FilledTonalButton(
-                    onClick = { pdfPickerLauncher.launch("application/pdf") },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    modifier = Modifier.testTag("btn_import_pdf")
-                ) {
-                    Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(15.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Importar PDF", fontSize = 11.sp)
-                }
-
-                OutlinedButton(
-                    onClick = { modelPickerLauncher.launch("*/*") },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    modifier = Modifier.testTag("btn_import_model")
-                ) {
-                    Icon(Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(15.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Modelo .task", fontSize = 11.sp)
-                }
-            }
-
-            // Chave para ativar IA Local (MediaPipe LLM / RAG)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = if (state.ragModeAi) "IA Local (RAG)" else "FTS (Zero Bateria)",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (state.ragModeAi) MaterialTheme.colorScheme.primary else Color(0xFF10B981)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Switch(
-                    checked = state.ragModeAi,
-                    onCheckedChange = { viewModel.setRagModeAi(it) },
-                    modifier = Modifier.testTag("switch_rag_mode")
-                )
-            }
-        }
-
-        // Status de importação
-        state.pdfImportStatus?.let { status ->
-            Surface(
-                color = if (crisisMode) Color(0xFF03101A) else MaterialTheme.colorScheme.primaryContainer,
-                shape = RoundedCornerShape(6.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 6.dp)
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
+                ),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, Color(0xFF334155)),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = status,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = if (crisisMode) Color.White else MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.padding(8.dp)
-                )
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { pdfPickerLauncher.launch("application/pdf") },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF0284C7),
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("btn_import_pdf")
+                            ) {
+                                Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text("Importar PDF", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            OutlinedButton(
+                                onClick = { modelPickerLauncher.launch("*/*") },
+                                border = BorderStroke(1.dp, Color(0xFFFBBF24)),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("btn_import_model")
+                            ) {
+                                Icon(Icons.Default.Memory, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text("Modelo .task", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                            }
+                        }
+
+                        // Chave para ativar IA Local (MediaPipe LLM / RAG)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (state.ragModeAi) "IA Local" else "FTS Rápido",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (state.ragModeAi) Color(0xFFFBBF24) else Color(0xFF34D399)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Switch(
+                                checked = state.ragModeAi,
+                                onCheckedChange = { viewModel.setRagModeAi(it) },
+                                modifier = Modifier.testTag("switch_rag_mode")
+                            )
+                        }
+                    }
+
+                    // Status de importação
+                    state.pdfImportStatus?.let { status ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            color = Color(0xFF0C2434),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = status,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White,
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
 
         if (state.ragModeAi) {
-            // --- MODO IA LOCAL (RAG COM PROMPT ESTRITO EM TÓPICOS) ---
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surface
-                ),
-                shape = RoundedCornerShape(10.dp),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    if (crisisMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        text = "Assistente de Emergência Civil Offline (RAG Local)",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "Executa inferência estritamente baseada nos 3 trechos oficiais mais relevantes das cartilhas.",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        OutlinedTextField(
-                            value = ragQuestionInput,
-                            onValueChange = { ragQuestionInput = it },
-                            placeholder = { Text("Ex: Como purificar água com Clorin?", fontSize = 11.sp) },
-                            singleLine = true,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("input_rag_question")
+            // --- 2A. MODO IA LOCAL (RAG COM PROMPT ESTRITO EM TÓPICOS) ---
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFFFBBF24)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Psychology,
+                                contentDescription = null,
+                                tint = Color(0xFFFBBF24),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Assistente de Emergência Civil Offline (RAG Local)",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.sp,
+                                color = Color(0xFFFBBF24)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Responde estritamente com base nos trechos oficiais das cartilhas (Gemma 4 / Motor Extrativo Offline).",
+                            fontSize = 12.sp,
+                            color = Color(0xFFCBD5E1)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Button(
-                            onClick = { viewModel.askRagQuestion(ragQuestionInput) },
-                            enabled = ragQuestionInput.isNotBlank() && !state.isRagLoading,
-                            contentPadding = PaddingValues(horizontal = 12.dp),
-                            modifier = Modifier.testTag("btn_ask_rag")
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            if (state.isRagLoading) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary
+                            OutlinedTextField(
+                                value = ragQuestionInput,
+                                onValueChange = { ragQuestionInput = it },
+                                placeholder = {
+                                    Text(
+                                        "Ex: Como purificar água com Clorin?",
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedBorderColor = Color(0xFFFBBF24),
+                                    unfocusedBorderColor = Color(0xFF475569)
+                                ),
+                                singleLine = true,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("input_rag_question")
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = { viewModel.askRagQuestion(ragQuestionInput) },
+                                enabled = ragQuestionInput.isNotBlank() && !state.isRagLoading,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF090D16)
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                                modifier = Modifier.testTag("btn_ask_rag")
+                            ) {
+                                if (state.isRagLoading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.5.dp,
+                                        color = Color(0xFF090D16)
+                                    )
+                                } else {
+                                    Icon(Icons.Default.Send, contentDescription = "Consultar")
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Sugestões rápidas também no modo IA Local
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(quickTopics) { topic ->
+                                SuggestionChip(
+                                    onClick = {
+                                        ragQuestionInput = topic
+                                        viewModel.askRagQuestion(topic)
+                                    },
+                                    label = {
+                                        Text(
+                                            topic,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    },
+                                    colors = SuggestionChipDefaults.suggestionChipColors(
+                                        containerColor = Color(0xFF1E293B)
+                                    )
                                 )
-                            } else {
-                                Icon(Icons.Default.Send, contentDescription = "Consultar")
                             }
                         }
                     }
                 }
             }
 
-            // Resposta gerada pela IA Local
+            // Resposta gerada pela IA Local com Alto Contraste (Fundo Verde Escuro Profundo + Texto Branco)
             state.ragResponse?.let { rag ->
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (crisisMode) Color(0xFF04140B) else Color(0xFFF0FDF4)
-                    ),
-                    shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF10B981)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = "Diretriz Oficial Sintetizada:",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                color = Color(0xFF10B981)
-                            )
-                            Surface(
-                                color = Color(0xFF10B981).copy(alpha = 0.2f),
-                                shape = RoundedCornerShape(4.dp)
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (crisisMode) Color(0xFF03140D) else Color(0xFF062E22)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.5.dp, Color(0xFF34D399)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = rag.executionMode,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF10B981),
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                    text = "Diretriz Oficial Sintetizada:",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 14.sp,
+                                    color = Color(0xFF34D399)
                                 )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        Text(
-                            text = rag.answer,
-                            fontSize = 12.sp,
-                            lineHeight = 18.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = "Auditoria Visual (Trechos Oficiais Originais do PDF):",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        rag.citedSources.forEach { s ->
-                            Surface(
-                                color = if (crisisMode) Color(0xFF0F172A) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                shape = RoundedCornerShape(6.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 3.dp)
-                            ) {
-                                Column(modifier = Modifier.padding(6.dp)) {
+                                Surface(
+                                    color = Color(0xFF090D16),
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(1.dp, Color(0xFF34D399))
+                                ) {
                                     Text(
-                                        text = "📄 ${s.docTitle} (Página ${s.pageNumber} • ${s.category}):",
+                                        text = rag.executionMode,
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF38BDF8)
+                                        color = Color(0xFF34D399),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                     )
-                                    Text(
-                                        text = "\"${s.contentText}\"",
-                                        fontSize = 10.sp,
-                                        lineHeight = 14.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Text(
+                                text = rag.answer,
+                                fontSize = 13.sp,
+                                lineHeight = 20.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color.White
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Text(
+                                text = "Auditoria Visual (Fontes Oficiais Utilizadas):",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 12.sp,
+                                color = Color(0xFFFBBF24)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            rag.citedSources.forEach { s ->
+                                Surface(
+                                    color = Color(0xFF090D16),
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(
+                                            text = "📄 ${s.docTitle} (Página ${s.pageNumber} • ${s.category}):",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF38BDF8)
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = "\"${s.contentText}\"",
+                                            fontSize = 11.sp,
+                                            lineHeight = 16.sp,
+                                            color = Color(0xFFE2E8F0)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -266,117 +339,139 @@ fun ManualsAiScreen(
                 }
             }
         } else {
-            // --- MODO RÁPIDO (FTS4 ZERO BATERIA) ---
-            OutlinedTextField(
-                value = state.manualQuery,
-                onValueChange = { viewModel.setManualQuery(it) },
-                label = { Text("Pesquisa Rápida FTS4 (Zero Consumo)") },
-                leadingIcon = {
-                    Icon(Icons.Default.Search, contentDescription = "Buscar")
-                },
-                trailingIcon = {
-                    if (state.manualQuery.isNotBlank()) {
-                        IconButton(onClick = { viewModel.setManualQuery("") }) {
-                            Icon(Icons.Default.Clear, contentDescription = "Limpar")
-                        }
-                    }
-                },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 6.dp)
-                    .testTag("input_fts_search")
-            )
+            // --- 2B. MODO RÁPIDO (FTS4 ZERO BATERIA) ---
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = state.manualQuery,
+                        onValueChange = { viewModel.setManualQuery(it) },
+                        label = {
+                            Text(
+                                "Pesquisa Rápida FTS4 (Zero Consumo)",
+                                color = Color(0xFFCBD5E1)
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Default.Search, contentDescription = "Buscar", tint = Color(0xFFFBBF24))
+                        },
+                        trailingIcon = {
+                            if (state.manualQuery.isNotBlank()) {
+                                IconButton(onClick = { viewModel.setManualQuery("") }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Limpar", tint = Color.White)
+                                }
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = Color(0xFFFBBF24),
+                            unfocusedBorderColor = Color(0xFF475569)
+                        ),
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("input_fts_search")
+                    )
 
-            // Chips rápidos de termos frequentes
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.padding(bottom = 6.dp)
-            ) {
-                items(quickTopics) { topic ->
-                    SuggestionChip(
-                        onClick = { viewModel.setManualQuery(topic) },
-                        label = { Text(topic, fontSize = 11.sp) },
-                        icon = {
-                            Icon(
-                                Icons.Default.BookmarkBorder,
-                                contentDescription = null,
-                                modifier = Modifier.size(13.dp)
+                    // Chips rápidos de termos frequentes
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(quickTopics) { topic ->
+                            SuggestionChip(
+                                onClick = { viewModel.setManualQuery(topic) },
+                                label = {
+                                    Text(
+                                        topic,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                },
+                                icon = {
+                                    Icon(
+                                        Icons.Default.BookmarkBorder,
+                                        contentDescription = null,
+                                        tint = Color(0xFFFBBF24),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                },
+                                colors = SuggestionChipDefaults.suggestionChipColors(
+                                    containerColor = Color(0xFF1E293B)
+                                )
                             )
                         }
-                    )
+                    }
                 }
             }
         }
 
-        // --- LISTA DE TRECHOS INDEXADOS ---
-        Text(
-            text = "${state.manualChunks.size} trecho(s) oficial(is) no banco local",
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 4.dp)
-        )
+        // --- 3. CABEÇALHO E LISTA DE TRECHOS INDEXADOS ---
+        item {
+            Text(
+                text = "${state.manualChunks.size} protocolo(s) oficial(is) disponível(is) offline:",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFFCBD5E1)
+            )
+        }
 
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(bottom = 80.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            items(state.manualChunks, key = { it.rowId }) { chunk ->
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surface
-                    ),
-                    shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (crisisMode) Color(0xFF27272A) else MaterialTheme.colorScheme.outlineVariant
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
+        items(state.manualChunks, key = { it.rowId }) { chunk ->
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
+                ),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(
+                    1.dp,
+                    if (crisisMode) Color(0xFF3F3F46) else Color(0xFF334155)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Surface(
+                            color = Color(0xFF0F2942),
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(0.5.dp, Color(0xFF38BDF8))
                         ) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.primaryContainer,
-                                shape = RoundedCornerShape(4.dp)
-                            ) {
-                                Text(
-                                    text = chunk.category,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
-                            }
                             Text(
-                                text = "Pág. ${chunk.pageNumber}",
+                                text = chunk.category,
+                                color = Color(0xFF38BDF8),
                                 fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                fontWeight = FontWeight.ExtraBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                             )
                         }
-
-                        Spacer(modifier = Modifier.height(4.dp))
-
                         Text(
-                            text = chunk.docTitle,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        Text(
-                            text = chunk.contentText,
-                            fontSize = 12.sp,
-                            lineHeight = 18.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            text = "Pág. ${chunk.pageNumber}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFFFBBF24)
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = chunk.docTitle,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 14.sp,
+                        color = Color.White
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = chunk.contentText,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        color = Color(0xFFE2E8F0)
+                    )
                 }
             }
         }

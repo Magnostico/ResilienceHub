@@ -12,6 +12,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -69,11 +70,13 @@ class MainActivity : ComponentActivity() {
             ResilienceHubTheme(isCrisisMode = state.crisisMode) {
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
+                    containerColor = if (state.crisisMode) Color.Black else Color(0xFF090D16),
                     topBar = {
                         ResilienceTopBar(
                             crisisMode = state.crisisMode,
                             isSosActive = state.isSosActive,
                             isWhistleActive = state.isWhistleActive,
+                            isLiveTracking = state.isLiveTracking,
                             onToggleCrisisMode = { viewModel.toggleCrisisMode() }
                         )
                     },
@@ -85,23 +88,36 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                     floatingActionButton = {
-                        if (state.selectedTab == 0) {
-                            FloatingActionButton(
-                                onClick = { showAddItemDialog = true },
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.testTag("fab_add_item")
-                            ) {
-                                Icon(Icons.Default.Add, contentDescription = "Adicionar Item")
+                        when (state.selectedTab) {
+                            0 -> {
+                                FloatingActionButton(
+                                    onClick = { showAddItemDialog = true },
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF090D16),
+                                    modifier = Modifier.testTag("fab_add_item")
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = "Adicionar Item")
+                                }
                             }
-                        } else if (state.selectedTab == 1) {
-                            FloatingActionButton(
-                                onClick = { showAddPoiDialog = true },
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.testTag("fab_add_poi")
-                            ) {
-                                Icon(Icons.Default.AddLocationAlt, contentDescription = "Adicionar Ponto")
+                            1 -> {
+                                FloatingActionButton(
+                                    onClick = { showAddPoiDialog = true },
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF090D16),
+                                    modifier = Modifier.testTag("fab_add_poi")
+                                ) {
+                                    Icon(Icons.Default.AddLocationAlt, contentDescription = "Adicionar Ponto")
+                                }
+                            }
+                            4 -> {
+                                FloatingActionButton(
+                                    onClick = { showAddProfileDialog = true },
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF090D16),
+                                    modifier = Modifier.testTag("fab_add_profile")
+                                ) {
+                                    Icon(Icons.Default.PersonAdd, contentDescription = "Adicionar Familiar")
+                                }
                             }
                         }
                     }
@@ -155,6 +171,15 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
+
+                    if (showAddProfileDialog) {
+                        AddProfileDialog(
+                            onDismiss = { showAddProfileDialog = false },
+                            onConfirm = { name, role, weightKg, bloodType, allergies, medications ->
+                                viewModel.addNewProfile(name, role, weightKg, bloodType, allergies, medications)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -167,6 +192,7 @@ fun ResilienceTopBar(
     crisisMode: Boolean,
     isSosActive: Boolean,
     isWhistleActive: Boolean,
+    isLiveTracking: Boolean,
     onToggleCrisisMode: () -> Unit
 ) {
     TopAppBar(
@@ -176,29 +202,43 @@ fun ResilienceTopBar(
                     Icon(
                         Icons.Default.Shield,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(19.dp)
+                        tint = Color(0xFFFBBF24),
+                        modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "ResilienceHub",
                         fontWeight = FontWeight.Black,
-                        fontSize = 17.sp,
-                        color = MaterialTheme.colorScheme.onSurface
+                        fontSize = 18.sp,
+                        color = Color.White
                     )
 
                     if (isSosActive || isWhistleActive) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Surface(
-                            color = Color.Red,
+                            color = Color(0xFFDC2626),
                             shape = RoundedCornerShape(4.dp)
                         ) {
                             Text(
                                 text = "BEACON ATIVO",
                                 color = Color.White,
                                 fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                fontWeight = FontWeight.ExtraBold,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+                    } else if (isLiveTracking) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            color = Color(0xFF059669),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "GPS VIVO",
+                                color = Color.White,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                             )
                         }
                     }
@@ -207,14 +247,14 @@ fun ResilienceTopBar(
                     Box(
                         modifier = Modifier
                             .size(6.dp)
-                            .background(Color(0xFF10B981), androidx.compose.foundation.shape.CircleShape)
+                            .background(Color(0xFF34D399), CircleShape)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = "100% OFFLINE • PROTOCOLO FEFO",
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF10B981)
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF34D399)
                     )
                 }
             }
@@ -224,28 +264,30 @@ fun ResilienceTopBar(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
+                    .padding(end = 6.dp)
                     .background(
-                        if (crisisMode) Color(0xFF1A1A1A) else MaterialTheme.colorScheme.surfaceVariant,
+                        if (crisisMode) Color(0xFF141414) else Color(0xFF1E293B),
                         RoundedCornerShape(8.dp)
                     )
                     .border(
                         1.dp,
-                        if (crisisMode) Color(0xFFF59E0B) else Color.Transparent,
+                        if (crisisMode) Color(0xFFFBBF24) else Color(0xFF334155),
                         RoundedCornerShape(8.dp)
                     )
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
             ) {
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
                         text = "CRISE OLED",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Black,
-                        color = if (crisisMode) Color(0xFFFBBF24) else MaterialTheme.colorScheme.onSurfaceVariant
+                        color = if (crisisMode) Color(0xFFFBBF24) else Color.White
                     )
                     Text(
-                        text = if (crisisMode) "#000000 ATIVO" else "NORMAL",
+                        text = if (crisisMode) "#000000 ATIVO" else "TÁTICO ESCURO",
                         fontSize = 8.sp,
-                        color = if (crisisMode) Color(0xFF10B981) else MaterialTheme.colorScheme.outline
+                        fontWeight = FontWeight.Bold,
+                        color = if (crisisMode) Color(0xFF34D399) else Color(0xFFCBD5E1)
                     )
                 }
                 Spacer(modifier = Modifier.width(6.dp))
@@ -259,7 +301,7 @@ fun ResilienceTopBar(
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surface
+            containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
         )
     )
 }
@@ -274,43 +316,57 @@ fun ResilienceBottomBar(
     onTabSelected: (Int) -> Unit,
     crisisMode: Boolean
 ) {
+    val itemColors = NavigationBarItemDefaults.colors(
+        selectedIconColor = Color(0xFF090D16),
+        selectedTextColor = Color(0xFFFBBF24),
+        indicatorColor = Color(0xFFFBBF24),
+        unselectedIconColor = Color(0xFFCBD5E1),
+        unselectedTextColor = Color(0xFFCBD5E1)
+    )
+
     NavigationBar(
-        containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surface,
+        containerColor = if (crisisMode) Color.Black else Color(0xFF111827),
+        tonalElevation = 8.dp,
         modifier = Modifier.testTag("resilience_bottom_bar")
     ) {
         NavigationBarItem(
             selected = selectedTab == 0,
             onClick = { onTabSelected(0) },
             icon = { Icon(Icons.Default.Inventory2, contentDescription = "Estoque") },
-            label = { Text("Estoque", fontSize = 10.sp, fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal) },
+            label = { Text("Estoque", fontSize = 11.sp, fontWeight = if (selectedTab == 0) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            colors = itemColors,
             modifier = Modifier.testTag("tab_inventory")
         )
         NavigationBarItem(
             selected = selectedTab == 1,
             onClick = { onTabSelected(1) },
             icon = { Icon(Icons.Default.Explore, contentDescription = "Mapas") },
-            label = { Text("Mapas", fontSize = 10.sp, fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal) },
+            label = { Text("Mapas", fontSize = 11.sp, fontWeight = if (selectedTab == 1) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            colors = itemColors,
             modifier = Modifier.testTag("tab_maps")
         )
         NavigationBarItem(
             selected = selectedTab == 2,
             onClick = { onTabSelected(2) },
             icon = { Icon(Icons.Default.MenuBook, contentDescription = "Manuais") },
-            label = { Text("Manuais", fontSize = 10.sp, fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal) },
+            label = { Text("Manuais", fontSize = 11.sp, fontWeight = if (selectedTab == 2) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            colors = itemColors,
             modifier = Modifier.testTag("tab_manuals")
         )
         NavigationBarItem(
             selected = selectedTab == 3,
             onClick = { onTabSelected(3) },
             icon = { Icon(Icons.Default.FlashOn, contentDescription = "Ferramentas") },
-            label = { Text("Ferramentas", fontSize = 10.sp, fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal) },
+            label = { Text("Ferramentas", fontSize = 11.sp, fontWeight = if (selectedTab == 3) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            colors = itemColors,
             modifier = Modifier.testTag("tab_tools")
         )
         NavigationBarItem(
             selected = selectedTab == 4,
             onClick = { onTabSelected(4) },
             icon = { Icon(Icons.Default.Shield, contentDescription = "Família") },
-            label = { Text("Família", fontSize = 10.sp, fontWeight = if (selectedTab == 4) FontWeight.Bold else FontWeight.Normal) },
+            label = { Text("Família", fontSize = 11.sp, fontWeight = if (selectedTab == 4) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            colors = itemColors,
             modifier = Modifier.testTag("tab_family")
         )
     }

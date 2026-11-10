@@ -11,42 +11,48 @@ import androidx.compose.ui.graphics.Color
 val OledCrisisColorScheme = darkColorScheme(
     primary = SafetyAmberBright,
     onPrimary = Color.Black,
-    primaryContainer = OledBlack,
+    primaryContainer = Color(0xFF18181B),
     onPrimaryContainer = SafetyAmberBright,
     secondary = TacticalCyan,
     onSecondary = Color.Black,
-    secondaryContainer = OledBlack,
+    secondaryContainer = Color(0xFF0C2434),
     onSecondaryContainer = TacticalCyan,
     background = OledBlack,
     onBackground = Color.White,
     surface = OledBlack,
     onSurface = Color.White,
-    surfaceVariant = OledBlack,
-    onSurfaceVariant = Slate400,
-    outline = OledBorder,
-    error = AlertRed,
-    onError = Color.Black
+    surfaceVariant = Color(0xFF121214),
+    onSurfaceVariant = Slate200,
+    outline = Color(0xFF3F3F46),
+    outlineVariant = Color(0xFF27272A),
+    error = Color(0xFFF87171),
+    onError = Color.Black,
+    errorContainer = Color(0xFF3B0A0A),
+    onErrorContainer = Color(0xFFFECACA)
 )
 
-// Tactical Dark Theme
+// Tactical Dark Theme (High-Contrast Readability)
 val TacticalDarkColorScheme = darkColorScheme(
-    primary = SafetyAmber,
+    primary = SafetyAmberBright,
     onPrimary = Slate950,
-    primaryContainer = Slate800,
+    primaryContainer = Color(0xFF1E293B),
     onPrimaryContainer = SafetyAmberBright,
     secondary = TacticalCyan,
     onSecondary = Slate950,
-    secondaryContainer = Slate800,
-    onSecondaryContainer = TacticalCyan,
+    secondaryContainer = Color(0xFF0F2942),
+    onSecondaryContainer = Color(0xFF7DD3FC),
     background = Slate950,
-    onBackground = Slate200,
+    onBackground = Color.White,
     surface = Slate900,
-    onSurface = Slate200,
+    onSurface = Color.White,
     surfaceVariant = Slate800,
     onSurfaceVariant = Slate400,
-    outline = Slate700,
-    error = AlertRed,
-    onError = Color.White
+    outline = Color(0xFF475569),
+    outlineVariant = Slate700,
+    error = Color(0xFFF87171),
+    onError = Color.Black,
+    errorContainer = Color(0xFF450A0A),
+    onErrorContainer = Color(0xFFFECACA)
 )
 
 val TacticalLightColorScheme = lightColorScheme(
@@ -61,6 +67,7 @@ val TacticalLightColorScheme = lightColorScheme(
     surface = Color.White,
     onSurface = Color(0xFF0F172A),
     outline = Color(0xFFCBD5E1),
+    outlineVariant = Color(0xFFE2E8F0),
     error = AlertRed,
     onError = Color.White
 )
@@ -73,14 +80,14 @@ fun getCrisisBorderColor(severity: Int, isCrisisMode: Boolean): Color {
         when (severity) {
             0 -> OperationalGreen
             1 -> WarningYellow
-            2, 3 -> AlertRed
-            else -> SafetyAmber
+            2, 3 -> Color(0xFFF87171)
+            else -> SafetyAmberBright
         }
     } else {
         when (severity) {
-            0 -> OperationalGreen.copy(alpha = 0.5f)
-            1 -> WarningYellow.copy(alpha = 0.6f)
-            2, 3 -> AlertRed.copy(alpha = 0.7f)
+            0 -> OperationalGreen.copy(alpha = 0.65f)
+            1 -> WarningYellow.copy(alpha = 0.8f)
+            2, 3 -> Color(0xFFF87171).copy(alpha = 0.85f)
             else -> Slate700
         }
     }

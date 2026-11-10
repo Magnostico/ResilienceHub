@@ -1,11 +1,10 @@
 package com.example.ui.components
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -34,188 +33,215 @@ fun FamilyVaultScreen(
 
     // Pega o peso da primeira criança cadastrada ou padrão de 24.0 kg
     val childProfile = state.profiles.find { it.role == FamilyRole.CHILD }
-    var customWeightKg by remember { mutableStateOf(childProfile?.weightKg ?: 24.0) }
+    var customWeightKg by remember(childProfile?.weightKg) {
+        mutableDoubleStateOf(childProfile?.weightKg ?: 24.0)
+    }
 
-    Column(
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 92.dp),
         modifier = modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(14.dp)
             .testTag("family_vault_screen")
     ) {
         // --- 1. CABEÇALHO DO COFRE FAMILIAR ---
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-            ),
-            shape = RoundedCornerShape(12.dp),
-            border = if (crisisMode) androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF27272A)) else null,
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
+                ),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, Color(0xFF334155)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(14.dp)
+                ) {
+                    Icon(
+                        Icons.Default.HealthAndSafety,
+                        contentDescription = null,
+                        tint = Color(0xFFFBBF24),
+                        modifier = Modifier.size(30.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Fichas Médicas de Emergência Civil",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.sp,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "Acesso imediato offline a tipo sanguíneo, alergias medicamentosas e dosagens pediátricas.",
+                            fontSize = 12.sp,
+                            color = Color(0xFFCBD5E1)
+                        )
+                    }
+                }
+            }
+        }
+
+        // --- 2. CALCULADORA PEDIÁTRICA RÁPIDA DE EMERGÊNCIA (ALTO CONTRASTE ESCURO) ---
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (crisisMode) Color.Black else Color(0xFF191308)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.5.dp, Color(0xFFF59E0B)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("pediatric_calculator_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Calculate,
+                                contentDescription = null,
+                                tint = Color(0xFFFBBF24),
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Calculadora Pediátrica de Emergência",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.sp,
+                                color = Color(0xFFFBBF24)
+                            )
+                        }
+
+                        Surface(
+                            color = Color(0xFFF59E0B),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = "${customWeightKg.toInt()} kg",
+                                fontWeight = FontWeight.Black,
+                                fontSize = 13.sp,
+                                color = Color(0xFF090D16),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = "Baseada no peso de ${childProfile?.name ?: "Criança"} (${customWeightKg.toInt()} kg). Ajuste abaixo:",
+                        fontSize = 12.sp,
+                        color = Color(0xFFE2E8F0)
+                    )
+
+                    // Stepper de ajuste de peso com botões claros
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                    ) {
+                        FilledTonalIconButton(
+                            onClick = { customWeightKg = (customWeightKg - 1.0).coerceAtLeast(3.0) },
+                            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                containerColor = Color(0xFF27272A),
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Icon(Icons.Default.Remove, contentDescription = "Diminuir peso")
+                        }
+                        Text(
+                            text = "${String.format(Locale.US, "%.0f", customWeightKg)} kg",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 18.dp)
+                        )
+                        FilledTonalIconButton(
+                            onClick = { customWeightKg = (customWeightKg + 1.0).coerceAtMost(60.0) },
+                            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                containerColor = Color(0xFFF59E0B),
+                                contentColor = Color(0xFF090D16)
+                            )
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "Aumentar peso")
+                        }
+                    }
+
+                    Divider(
+                        color = Color(0xFF3F2E12),
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+
+                    // Dosagens Calculadas
+                    val weight = customWeightKg
+                    val dipironaGotas = minOf(weight.toInt(), 40)
+                    val paracetamolGotas = minOf(weight.toInt(), 35)
+                    val sroMinMl = (weight * 50).toInt()
+                    val sroMaxMl = (weight * 100).toInt()
+
+                    PediatricDoseRow(
+                        medName = "Dipirona Gotas (500mg/ml)",
+                        rule = "1 gota por kg (máx 40 gotas)",
+                        doseCalculated = "$dipironaGotas gotas",
+                        interval = "a cada 6 em 6 horas"
+                    )
+
+                    PediatricDoseRow(
+                        medName = "Paracetamol Gotas (200mg/ml)",
+                        rule = "1 gota por kg (máx 35 gotas)",
+                        doseCalculated = "$paracetamolGotas gotas",
+                        interval = "a cada 6 em 6 horas"
+                    )
+
+                    PediatricDoseRow(
+                        medName = "SRO — Reidratação Oral (OMS)",
+                        rule = "50 a 100 ml / kg em 4 horas",
+                        doseCalculated = "$sroMinMl a $sroMaxMl ml",
+                        interval = "ingerir aos poucos em colheres"
+                    )
+                }
+            }
+        }
+
+        // --- 3. CABEÇALHO E BOTÃO DE NOVO MEMBRO FAMILIAR ---
+        item {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(12.dp)
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(
-                    Icons.Default.HealthAndSafety,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(28.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = "Fichas Médicas de Emergência Civil",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "Acesso instantâneo offline a tipo sanguíneo, alergias a antibióticos e dosagens pediátricas.",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // --- 2. CALCULADORA PEDIÁTRICA RÁPIDA DE EMERGÊNCIA ---
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = if (crisisMode) Color.Black else Color(0xFFFFFBEB)
-            ),
-            shape = RoundedCornerShape(12.dp),
-            border = androidx.compose.foundation.BorderStroke(
-                1.dp,
-                if (crisisMode) Color(0xFFF59E0B) else Color(0xFFFDE68A)
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("pediatric_calculator_card")
-        ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Default.Calculate,
-                            contentDescription = null,
-                            tint = Color(0xFFD97706),
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Calculadora Pediátrica de Emergência",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            color = if (crisisMode) Color(0xFFFBBF24) else Color(0xFF92400E)
-                        )
-                    }
-
-                    Surface(
-                        color = if (crisisMode) Color(0xFF291B02) else Color(0xFFFEF3C7),
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text(
-                            text = "${customWeightKg.toInt()} kg",
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 12.sp,
-                            color = Color(0xFFD97706),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
                 Text(
-                    text = "Baseada no peso de ${childProfile?.name ?: "Criança"} (${customWeightKg.toInt()} kg). Ajuste conforme necessário:",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    text = "Membros do Núcleo Familiar (${state.profiles.size}):",
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 15.sp,
+                    color = Color.White
                 )
-
-                // Stepper de ajuste de peso
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
+                Button(
+                    onClick = onOpenAddProfileDialog,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF0284C7),
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    IconButton(onClick = { customWeightKg = (customWeightKg - 1.0).coerceAtLeast(3.0) }) {
-                        Icon(Icons.Default.RemoveCircleOutline, contentDescription = "Diminuir peso")
-                    }
-                    Text(
-                        text = "${String.format(Locale.US, "%.0f", customWeightKg)} kg",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 12.dp)
-                    )
-                    IconButton(onClick = { customWeightKg = (customWeightKg + 1.0).coerceAtMost(60.0) }) {
-                        Icon(Icons.Default.AddCircleOutline, contentDescription = "Aumentar peso")
-                    }
+                    Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text("Novo Familiar", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
-
-                Divider(
-                    color = if (crisisMode) Color(0xFF27272A) else Color(0xFFFDE68A),
-                    modifier = Modifier.padding(vertical = 6.dp)
-                )
-
-                // Dosagens Calculadas
-                val weight = customWeightKg
-                val dipironaGotas = minOf(weight.toInt(), 40)
-                val paracetamolGotas = minOf(weight.toInt(), 35)
-                val sroMinMl = (weight * 50).toInt()
-                val sroMaxMl = (weight * 100).toInt()
-
-                PediatricDoseRow(
-                    medName = "Dipirona Gotas (500mg/ml)",
-                    rule = "1 gota por kg (máx 40 gotas)",
-                    doseCalculated = "$dipironaGotas gotas",
-                    interval = "a cada 6 em 6 horas",
-                    crisisMode = crisisMode
-                )
-
-                PediatricDoseRow(
-                    medName = "Paracetamol Gotas (200mg/ml)",
-                    rule = "1 gota por kg (máx 35 gotas)",
-                    doseCalculated = "$paracetamolGotas gotas",
-                    interval = "a cada 6 em 6 horas",
-                    crisisMode = crisisMode
-                )
-
-                PediatricDoseRow(
-                    medName = "SRO — Reidratação Oral (OMS)",
-                    rule = "50 a 100 ml / kg em 4 horas",
-                    doseCalculated = "$sroMinMl a $sroMaxMl ml",
-                    interval = "ingerir aos poucos em colheres",
-                    crisisMode = crisisMode
-                )
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // --- 3. LISTA DE FICHAS FAMILIARES ---
-        Text(
-            text = "Membros Cadastrados do Núcleo Familiar:",
-            fontWeight = FontWeight.Bold,
-            fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.padding(bottom = 6.dp)
-        )
-
-        state.profiles.forEach { profile ->
+        // --- 4. LISTA DE FICHAS FAMILIARES ---
+        items(state.profiles, key = { it.id }) { profile ->
             FamilyVaultProfileCard(profile = profile, crisisMode = crisisMode)
-            Spacer(modifier = Modifier.height(8.dp))
         }
-
-        Spacer(modifier = Modifier.height(80.dp))
     }
 }
 
@@ -224,40 +250,40 @@ fun PediatricDoseRow(
     medName: String,
     rule: String,
     doseCalculated: String,
-    interval: String,
-    crisisMode: Boolean
+    interval: String
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
+            .padding(vertical = 6.dp)
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = medName,
-                fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurface
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 13.sp,
+                color = Color.White
             )
             Text(
                 text = "$rule • $interval",
-                fontSize = 10.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                fontSize = 11.sp,
+                color = Color(0xFFCBD5E1)
             )
         }
 
         Surface(
-            color = if (crisisMode) Color(0xFF1E293B) else Color(0xFFE2E8F0),
-            shape = RoundedCornerShape(6.dp)
+            color = Color(0xFF090D16),
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, Color(0xFFFBBF24))
         ) {
             Text(
                 text = doseCalculated,
                 fontWeight = FontWeight.Black,
                 fontSize = 13.sp,
-                color = if (crisisMode) Color(0xFFFBBF24) else Color(0xFFB45309),
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                color = Color(0xFFFBBF24),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
             )
         }
     }
@@ -270,18 +296,18 @@ fun FamilyVaultProfileCard(
 ) {
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = if (crisisMode) Color.Black else MaterialTheme.colorScheme.surface
+            containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
         ),
-        shape = RoundedCornerShape(10.dp),
-        border = androidx.compose.foundation.BorderStroke(
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(
             1.dp,
-            if (crisisMode) Color(0xFF27272A) else MaterialTheme.colorScheme.outlineVariant
+            if (crisisMode) Color(0xFF3F3F46) else Color(0xFF334155)
         ),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("family_profile_${profile.id}")
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -291,73 +317,78 @@ fun FamilyVaultProfileCard(
                     Icon(
                         if (profile.role == FamilyRole.ADULT) Icons.Default.Person else Icons.Default.ChildCare,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
+                        tint = Color(0xFFFBBF24),
+                        modifier = Modifier.size(20.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = profile.name,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurface
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 16.sp,
+                        color = Color.White
                     )
                 }
 
                 Surface(
-                    color = if (crisisMode) Color(0xFF2B0A0A) else Color(0xFFFFEBEE),
-                    shape = RoundedCornerShape(4.dp),
-                    border = androidx.compose.foundation.BorderStroke(0.5.dp, Color(0xFFC62828))
+                    color = Color(0xFF3B0A0A),
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, Color(0xFFF87171))
                 ) {
                     Text(
-                        text = "Tipo ${profile.bloodType}",
-                        color = Color(0xFFC62828),
+                        text = "Sangue ${profile.bloodType}",
+                        color = Color(0xFFF87171),
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        fontWeight = FontWeight.ExtraBold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "${profile.role.displayName} • ${profile.weightKg.toInt()} kg",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                text = "${profile.role.displayName} • Peso: ${profile.weightKg.toInt()} kg",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = Color(0xFF38BDF8)
             )
 
             Divider(
-                color = if (crisisMode) Color(0xFF1E1E1E) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                modifier = Modifier.padding(vertical = 6.dp)
+                color = Color(0xFF1E293B),
+                modifier = Modifier.padding(vertical = 8.dp)
             )
 
             // Alergias
-            Row {
+            Row(verticalAlignment = Alignment.Top) {
                 Text(
-                    text = "Alergias: ",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.error
+                    text = "⚠ Alergias: ",
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 12.sp,
+                    color = Color(0xFFF87171)
                 )
                 Text(
                     text = profile.allergies,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
                 )
             }
 
+            Spacer(modifier = Modifier.height(4.dp))
+
             // Medicações contínuas
-            Row(modifier = Modifier.padding(top = 2.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
                 Text(
-                    text = "Medicação: ",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.primary
+                    text = "💊 Medicação: ",
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 12.sp,
+                    color = Color(0xFFFBBF24)
                 )
                 Text(
                     text = profile.medications,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFFE2E8F0)
                 )
             }
         }

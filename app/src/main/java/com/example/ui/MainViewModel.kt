@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 data class MainUiState(
     val crisisMode: Boolean = false,
@@ -41,8 +42,13 @@ data class MainUiState(
     val currentLat: Double = -22.9519, // Rio de Janeiro (Botafogo / Copacabana)
     val currentLon: Double = -43.1850,
     val isGpsActive: Boolean = false,
-    val gpsProviderInfo: String = "GPS STANDBY",
-    val selectedTab: Int = 0, // 0: Estoque, 1: Água, 2: Pontos, 3: Guia FTS / RAG, 4: Ferramentas Hardware, 5: Família
+    val isLiveTracking: Boolean = false,
+    val currentSpeedKmh: Float = 0f,
+    val currentHeadingDegrees: Float = 0f,
+    val currentAccuracyMeters: Float = 0f,
+    val movementTrail: List<Pair<Double, Double>> = emptyList(),
+    val gpsProviderInfo: String = "GPS STANDBY (Economia)",
+    val selectedTab: Int = 0, // 0: Estoque, 1: Mapas, 2: Manuais IA, 3: Ferramentas, 4: Família
 
     // Hardware states
     val isTorchOn: Boolean = false,
@@ -71,6 +77,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _manualQuery = MutableStateFlow("")
     private val _currentLat = MutableStateFlow(-22.9519)
     private val _currentLon = MutableStateFlow(-43.1850)
+    private val _currentSpeedKmh = MutableStateFlow(0f)
+    private val _currentHeadingDegrees = MutableStateFlow(0f)
+    private val _currentAccuracyMeters = MutableStateFlow(0f)
+    private val _movementTrail = MutableStateFlow<List<Pair<Double, Double>>>(
+        listOf(-22.9519 to -43.1850)
+    )
     private val _gpsProviderInfo = MutableStateFlow("GPS STANDBY (Economia)")
     private val _selectedTab = MutableStateFlow(0)
 
@@ -87,6 +99,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         // Agenda a checagem diária em segundo plano do WorkManager
         ExpirationWorker.scheduleDailyCheck(application)
+
+        // Coleta contínua de movimentação GPS em tempo real quando ativado pelo usuário
+        viewModelScope.launch {
+            hardwareToolsManager.liveLocation.collect { loc ->
+                if (loc != null) {
+                    val newLat = loc.latitude
+                    val newLon = loc.longitude
+                    _currentLat.value = newLat
+                    _currentLon.value = newLon
+                    _currentSpeedKmh.value = if (loc.hasSpeed()) loc.speed * 3.6f else 0f
+                    if (loc.hasBearing()) {
+                        _currentHeadingDegrees.value = loc.bearing
+                    }
+                    _currentAccuracyMeters.value = if (loc.hasAccuracy()) loc.accuracy else 0f
+
+                    appendPointToTrail(newLat, newLon)
+
+                    val speedStr = String.format(Locale.US, "%.1f km/h", _currentSpeedKmh.value)
+                    val accStr = if (loc.hasAccuracy()) "±${loc.accuracy.toInt()}m" else ""
+                    _gpsProviderInfo.value = "RASTREIO VIVO ATIVO • $speedStr $accStr"
+                }
+            }
+        }
+    }
+
+    private fun appendPointToTrail(lat: Double, lon: Double) {
+        val currentList = _movementTrail.value
+        val last = currentList.lastOrNull()
+        if (last == null) {
+            _movementTrail.value = listOf(lat to lon)
+            return
+        }
+        val distMeters = engine.haversineMeters(last.first, last.second, lat, lon)
+        if (distMeters >= 1.0) {
+            // Calcula rumo estimado caso o chip GPS não forneça bearing em baixa velocidade
+            val bearing = engine.initialBearingDegrees(last.first, last.second, lat, lon).toFloat()
+            if (_currentHeadingDegrees.value == 0f || distMeters >= 2.0) {
+                _currentHeadingDegrees.value = bearing
+            }
+            _movementTrail.value = (currentList + (lat to lon)).takeLast(250)
+        }
     }
 
     val uiState: StateFlow<MainUiState> = combine(
@@ -102,6 +155,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _currentLat,
             _currentLon,
             hardwareToolsManager.isGpsActive,
+            hardwareToolsManager.isLiveTracking,
+            _currentSpeedKmh,
+            _currentHeadingDegrees,
+            _currentAccuracyMeters,
+            _movementTrail,
             _gpsProviderInfo,
             _selectedTab,
             hardwareToolsManager.isTorchOn,
@@ -128,16 +186,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val lat = flowsArray[8] as Double
         val lon = flowsArray[9] as Double
         val isGpsActive = flowsArray[10] as Boolean
-        val gpsProviderInfo = flowsArray[11] as String
-        val tab = flowsArray[12] as Int
-        val isTorchOn = flowsArray[13] as Boolean
-        val isSosActive = flowsArray[14] as Boolean
-        val isWhistleActive = flowsArray[15] as Boolean
+        val isLiveTracking = flowsArray[11] as Boolean
+        val speedKmh = flowsArray[12] as Float
+        val headingDeg = flowsArray[13] as Float
+        val accuracyM = flowsArray[14] as Float
         @Suppress("UNCHECKED_CAST")
-        val ragResponse = flowsArray[16] as? PdfRagManager.RagResponse
-        val isRagLoading = flowsArray[17] as Boolean
-        val ragModeAi = flowsArray[18] as Boolean
-        val pdfImportStatus = flowsArray[19] as? String
+        val movementTrail = flowsArray[15] as List<Pair<Double, Double>>
+        val gpsProviderInfo = flowsArray[16] as String
+        val tab = flowsArray[17] as Int
+        val isTorchOn = flowsArray[18] as Boolean
+        val isSosActive = flowsArray[19] as Boolean
+        val isWhistleActive = flowsArray[20] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val ragResponse = flowsArray[21] as? PdfRagManager.RagResponse
+        val isRagLoading = flowsArray[22] as Boolean
+        val ragModeAi = flowsArray[23] as Boolean
+        val pdfImportStatus = flowsArray[24] as? String
 
         // Filtragem do estoque
         val filteredItems = allItems.filter { item ->
@@ -173,6 +237,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             currentLat = lat,
             currentLon = lon,
             isGpsActive = isGpsActive,
+            isLiveTracking = isLiveTracking,
+            currentSpeedKmh = speedKmh,
+            currentHeadingDegrees = headingDeg,
+            currentAccuracyMeters = accuracyM,
+            movementTrail = movementTrail,
             gpsProviderInfo = gpsProviderInfo,
             selectedTab = tab,
             isTorchOn = isTorchOn,
@@ -236,6 +305,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Alterna o Rastreio Vivo (movimentação em tempo real no mapa com trilha de deslocamento).
+     */
+    fun toggleLiveGpsTracking() {
+        if (hardwareToolsManager.isLiveTracking.value) {
+            hardwareToolsManager.stopLiveLocationTracking()
+            _currentSpeedKmh.value = 0f
+            _gpsProviderInfo.value = "RASTREIO PAUSADO • GPS DESLIGADO (Economia)"
+        } else {
+            val started = hardwareToolsManager.startLiveLocationTracking()
+            if (started) {
+                _gpsProviderInfo.value = "RASTREIO VIVO ATIVO • ACOMPANHANDO MOVIMENTO..."
+            } else {
+                _gpsProviderInfo.value = "SEM PERMISSÃO DE LOCALIZAÇÃO PARA RASTREIO"
+            }
+        }
+    }
+
+    fun clearMovementTrail() {
+        _movementTrail.value = listOf(_currentLat.value to _currentLon.value)
+    }
+
+    /**
      * GPS Pulso On-Demand: liga o hardware, busca coordenada com timeout de 8s e desliga imediatamente.
      */
     fun triggerSingleShotGpsPulse() {
@@ -245,6 +336,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (result.location != null) {
                 _currentLat.value = result.location.latitude
                 _currentLon.value = result.location.longitude
+                appendPointToTrail(result.location.latitude, result.location.longitude)
                 _gpsProviderInfo.value = "FIX OBTIDO (${result.providerUsed}) em ${result.durationMs}ms • GPS DESLIGADO"
             } else {
                 _gpsProviderInfo.value = "TIMEOUT GPS (8s) • GPS DESLIGADO PARA SALVAR BATERIA"

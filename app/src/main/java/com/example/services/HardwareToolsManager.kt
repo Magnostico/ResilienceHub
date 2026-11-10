@@ -70,6 +70,15 @@ class HardwareToolsManager(private val context: Context) {
     private val _isGpsActive = MutableStateFlow(false)
     val isGpsActive: StateFlow<Boolean> = _isGpsActive.asStateFlow()
 
+    // Rastreio contínuo de movimentação em tempo real (Live Tracking)
+    private val _isLiveTracking = MutableStateFlow(false)
+    val isLiveTracking: StateFlow<Boolean> = _isLiveTracking.asStateFlow()
+
+    private val _liveLocation = MutableStateFlow<Location?>(null)
+    val liveLocation: StateFlow<Location?> = _liveLocation.asStateFlow()
+
+    private var liveLocationListener: LocationListener? = null
+
     private var sosJob: Job? = null
     private var whistleJob: Job? = null
     private var audioTrack: AudioTrack? = null
@@ -390,12 +399,92 @@ class HardwareToolsManager(private val context: Context) {
         }
     }
 
+    // =========================================================================
+    // 4. RASTREIO CONTÍNUO DE MOVIMENTAÇÃO (LIVE TRACKING NO MAPA)
+    // =========================================================================
+
+    @SuppressLint("MissingPermission")
+    fun startLiveLocationTracking(): Boolean {
+        val hasFine = ContextCompat.checkSelfPermission(
+            context,
+            android.Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(
+            context,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasFine && !hasCoarse) return false
+        if (_isLiveTracking.value) return true
+
+        val listener = object : LocationListener {
+            override fun onLocationChanged(loc: Location) {
+                _liveLocation.value = loc
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+            override fun onProviderEnabled(provider: String) {}
+            override fun onProviderDisabled(provider: String) {}
+        }
+
+        return try {
+            liveLocationListener = listener
+            _isLiveTracking.value = true
+            _isGpsActive.value = true
+
+            // Emite imediatamente a última posição conhecida se disponível
+            val lastKnown = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                ?: locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            if (lastKnown != null) {
+                _liveLocation.value = lastKnown
+            }
+
+            if (hasFine && locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    1500L, // Atualiza a cada 1.5s
+                    1.0f,  // Ou a cada 1 metro de deslocamento
+                    listener,
+                    Looper.getMainLooper()
+                )
+            }
+            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                    LocationManager.NETWORK_PROVIDER,
+                    2500L,
+                    1.5f,
+                    listener,
+                    Looper.getMainLooper()
+                )
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao iniciar rastreio de movimentação ao vivo", e)
+            _isLiveTracking.value = false
+            _isGpsActive.value = false
+            false
+        }
+    }
+
+    fun stopLiveLocationTracking() {
+        try {
+            liveLocationListener?.let { locationManager.removeUpdates(it) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao parar rastreio de movimentação", e)
+        }
+        liveLocationListener = null
+        _isLiveTracking.value = false
+        _isGpsActive.value = false
+    }
+
     /**
      * Limpeza geral de hardware ao encerrar
      */
     fun releaseAll() {
         stopSosMorse()
         stopWhistle()
+        stopLiveLocationTracking()
         _isTorchOn.value = false
         _isGpsActive.value = false
     }
