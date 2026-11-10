@@ -8,7 +8,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -57,12 +58,19 @@ import java.net.URL
 import java.util.Locale
 import kotlin.math.*
 
+private data class NamedRoadVector(
+    val name: String,
+    val labelLat: Double,
+    val labelLon: Double,
+    val points: List<Pair<Double, Double>>
+)
+
 /**
  * Motor Cartográfico Híbrido 100% Kotlin/Compose (Zero dependências C++ / Zero Crash):
- * 1. Projeção Web Mercator real com suporte a Pan (arrastar), Zoom (10 a 17) e Modo Tela Cheia (100% Display).
- * 2. Rastreio Vivo de Movimentação (GPS Live Tracking) com trilha de deslocamento (breadcrumb trail),
- *    cone direcional de rumo (heading), velocidade em km/h e modo Auto-Seguir.
- * 3. Cache automático de Tiles OpenStreetMap em disco local + Cartografia Vetorial Offline do Rio de Janeiro.
+ * 1. Projeção Web Mercator com Escala DPI Nativa (256.dp por tile) para que os nomes das ruas fiquem grandes e nítidos no celular.
+ * 2. Suporte a Zoom com os Dedos (Pinça / Pinch-to-Zoom contínuo de 10.0x a 19.5x), Duplo-Toque para Zoom e Arrastar (Pan).
+ * 3. Modo Tela Cheia (100% da tela do celular) com HUD retrátil e Rastreio Vivo de Movimentação (GPS Live Tracking).
+ * 4. Cache automático de Tiles OpenStreetMap até nível de rua (Zoom 19) + Nomes de Ruas Vetoriais Offline.
  */
 @Composable
 fun OfflineMapScreen(
@@ -80,11 +88,14 @@ fun OfflineMapScreen(
     val focusedPoi = navList.find { it.poiId == selectedPoiId } ?: navList.firstOrNull()
     val focusedPoiEntity = state.pois.find { it.id == focusedPoi?.poiId }
 
-    // Estado da câmera do mapa (Web Mercator)
+    // Estado da câmera do mapa (Web Mercator com zoom contínuo por pinça de 10.0f a 19.5f)
     var mapCenterLat by remember { mutableDoubleStateOf(state.currentLat) }
     var mapCenterLon by remember { mutableDoubleStateOf(state.currentLon) }
-    var mapZoom by remember { mutableIntStateOf(14) }
+    var mapZoomFloat by remember { mutableFloatStateOf(15.0f) }
+    val mapZoomInt = mapZoomFloat.toInt().coerceIn(10, 19)
+
     var isMapFullscreen by remember { mutableStateOf(false) }
+    var showBottomPoisInFullscreen by remember { mutableStateOf(true) }
     var autoFollowUser by remember { mutableStateOf(true) }
     var showStreetTiles by remember { mutableStateOf(true) }
 
@@ -160,14 +171,14 @@ fun OfflineMapScreen(
                             )
                         }
 
-                        FilledTonalButton(
+                        Button(
                             onClick = { isMapFullscreen = true },
-                            colors = ButtonDefaults.filledTonalButtonColors(
+                            colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF0284C7),
                                 contentColor = Color.White
                             ),
                             shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                             modifier = Modifier.testTag("btn_open_fullscreen_map")
                         ) {
                             Icon(
@@ -176,7 +187,7 @@ fun OfflineMapScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Tela Cheia", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("Tela Cheia", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
                         }
                     }
 
@@ -275,10 +286,9 @@ fun OfflineMapScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(10.dp))
-
                     // Painel da Bússola apontando para o Abrigo/Hospital focado
                     if (focusedPoi != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -360,7 +370,7 @@ fun OfflineMapScreen(
             }
         }
 
-        // --- 2. PRÉVIA INTERATIVA DO MAPA COM BOTÃO DE TELA CHEIA ---
+        // --- 2. PRÉVIA INTERATIVA DO MAPA COM PINÇA (ZOOM COM DEDOS) E TELA CHEIA ---
         item {
             Card(
                 colors = CardDefaults.cardColors(
@@ -373,14 +383,14 @@ fun OfflineMapScreen(
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(290.dp)
+                    .height(330.dp)
             ) {
                 MapViewportBox(
                     context = context,
                     state = state,
                     mapCenterLat = mapCenterLat,
                     mapCenterLon = mapCenterLon,
-                    mapZoom = mapZoom,
+                    mapZoomFloat = mapZoomFloat,
                     autoFollowUser = autoFollowUser,
                     showStreetTiles = showStreetTiles,
                     isFullscreen = false,
@@ -390,33 +400,39 @@ fun OfflineMapScreen(
                     isPreloadingTiles = isPreloadingTiles,
                     preloadStatusText = preloadStatusText,
                     onUpdateCachedCount = { cachedTilesCount = countCachedTilesOnDisk(context) },
-                    onPanMap = { dLat, dLon ->
-                        autoFollowUser = false
-                        mapCenterLat = (mapCenterLat + dLat).coerceIn(-23.15, -22.70)
-                        mapCenterLon = (mapCenterLon + dLon).coerceIn(-43.80, -42.95)
+                    onTransformMap = { dLat, dLon, zoomFactor ->
+                        if (abs(dLat) > 1e-7 || abs(dLon) > 1e-7) {
+                            autoFollowUser = false
+                            mapCenterLat = (mapCenterLat + dLat).coerceIn(-23.15, -22.70)
+                            mapCenterLon = (mapCenterLon + dLon).coerceIn(-43.80, -42.95)
+                        }
+                        if (zoomFactor != 1.0f) {
+                            val deltaZ = (ln(zoomFactor.toDouble()) / ln(2.0)).toFloat()
+                            mapZoomFloat = (mapZoomFloat + deltaZ).coerceIn(10.0f, 19.2f)
+                        }
                     },
-                    onZoomChange = { newZoom -> mapZoom = newZoom.coerceIn(10, 17) },
+                    onZoomChange = { newZoom -> mapZoomFloat = newZoom.coerceIn(10.0f, 19.2f) },
                     onCenterUser = {
                         autoFollowUser = true
                         mapCenterLat = state.currentLat
                         mapCenterLon = state.currentLon
-                        if (mapZoom < 15) mapZoom = 15
+                        if (mapZoomFloat < 16.0f) mapZoomFloat = 16.5f
                     },
                     onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
                     onToggleFullscreen = { isMapFullscreen = true },
                     onPreloadTiles = {
                         scope.launch {
                             isPreloadingTiles = true
-                            preloadStatusText = "Baixando mapa local..."
+                            preloadStatusText = "Baixando ruas detalhadas..."
                             val downloaded = preloadRegionTiles(
                                 context = context,
                                 centerLat = mapCenterLat,
                                 centerLon = mapCenterLon,
-                                zoom = mapZoom,
+                                zoom = mapZoomInt,
                                 cache = tileBitmapCache
                             )
                             cachedTilesCount = countCachedTilesOnDisk(context)
-                            preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos salvos offline" else "✓ Região já salva offline"
+                            preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos de ruas salvos" else "✓ Ruas da região em cache"
                             isPreloadingTiles = false
                         }
                     }
@@ -512,7 +528,7 @@ fun OfflineMapScreen(
                             autoFollowUser = false
                             mapCenterLat = targetPoi.latitude
                             mapCenterLon = targetPoi.longitude
-                            if (mapZoom < 14) mapZoom = 14
+                            if (mapZoomFloat < 16.0f) mapZoomFloat = 16.5f
                         }
                     },
                     onDelete = { viewModel.deletePoi(nav.poiId) }
@@ -536,7 +552,7 @@ fun OfflineMapScreen(
     }
 
     // =========================================================================
-    // MODAL DE MAPA EM TELA CHEIA (100% DA TELA COM HUD TÁTICO E RASTREIO VIVO)
+    // MODAL DE MAPA EM TELA CHEIA (100% DA TELA DO CELULAR COM ZOOM DE PINÇA)
     // =========================================================================
     if (isMapFullscreen) {
         Dialog(
@@ -558,7 +574,7 @@ fun OfflineMapScreen(
                         state = state,
                         mapCenterLat = mapCenterLat,
                         mapCenterLon = mapCenterLon,
-                        mapZoom = mapZoom,
+                        mapZoomFloat = mapZoomFloat,
                         autoFollowUser = autoFollowUser,
                         showStreetTiles = showStreetTiles,
                         isFullscreen = true,
@@ -568,33 +584,39 @@ fun OfflineMapScreen(
                         isPreloadingTiles = isPreloadingTiles,
                         preloadStatusText = preloadStatusText,
                         onUpdateCachedCount = { cachedTilesCount = countCachedTilesOnDisk(context) },
-                        onPanMap = { dLat, dLon ->
-                            autoFollowUser = false
-                            mapCenterLat = (mapCenterLat + dLat).coerceIn(-23.15, -22.70)
-                            mapCenterLon = (mapCenterLon + dLon).coerceIn(-43.80, -42.95)
+                        onTransformMap = { dLat, dLon, zoomFactor ->
+                            if (abs(dLat) > 1e-7 || abs(dLon) > 1e-7) {
+                                autoFollowUser = false
+                                mapCenterLat = (mapCenterLat + dLat).coerceIn(-23.15, -22.70)
+                                mapCenterLon = (mapCenterLon + dLon).coerceIn(-43.80, -42.95)
+                            }
+                            if (zoomFactor != 1.0f) {
+                                val deltaZ = (ln(zoomFactor.toDouble()) / ln(2.0)).toFloat()
+                                mapZoomFloat = (mapZoomFloat + deltaZ).coerceIn(10.0f, 19.2f)
+                            }
                         },
-                        onZoomChange = { newZoom -> mapZoom = newZoom.coerceIn(10, 17) },
+                        onZoomChange = { newZoom -> mapZoomFloat = newZoom.coerceIn(10.0f, 19.2f) },
                         onCenterUser = {
                             autoFollowUser = true
                             mapCenterLat = state.currentLat
                             mapCenterLon = state.currentLon
-                            if (mapZoom < 15) mapZoom = 15
+                            if (mapZoomFloat < 16.5f) mapZoomFloat = 17.0f
                         },
                         onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
                         onToggleFullscreen = { isMapFullscreen = false },
                         onPreloadTiles = {
                             scope.launch {
                                 isPreloadingTiles = true
-                                preloadStatusText = "Baixando mapa local..."
+                                preloadStatusText = "Baixando ruas detalhadas..."
                                 val downloaded = preloadRegionTiles(
                                     context = context,
                                     centerLat = mapCenterLat,
                                     centerLon = mapCenterLon,
-                                    zoom = mapZoom,
+                                    zoom = mapZoomInt,
                                     cache = tileBitmapCache
                                 )
                                 cachedTilesCount = countCachedTilesOnDisk(context)
-                                preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos salvos offline" else "✓ Região em cache"
+                                preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos de ruas salvos" else "✓ Região em cache"
                                 isPreloadingTiles = false
                             }
                         }
@@ -603,14 +625,14 @@ fun OfflineMapScreen(
                     // HUD Tático Superior em Tela Cheia (Bússola + Velocidade + Botão Fechar)
                     Card(
                         colors = CardDefaults.cardColors(
-                            containerColor = Color(0xFF090D16).copy(alpha = 0.92f)
+                            containerColor = Color(0xFF090D16).copy(alpha = 0.90f)
                         ),
                         shape = RoundedCornerShape(12.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 36.dp)
+                            .padding(horizontal = 12.dp, vertical = 34.dp)
                     ) {
                         Column(modifier = Modifier.padding(10.dp)) {
                             Row(
@@ -641,12 +663,19 @@ fun OfflineMapScreen(
                                                 maxLines = 1
                                             )
                                             Text(
-                                                text = "Azimute ${focusedPoi.bearingDegrees.toInt()}° (${focusedPoi.cardinalDetailed}) • Vel: ${String.format(Locale.US, "%.1f km/h", state.currentSpeedKmh)}",
+                                                text = "Zoom ${String.format(Locale.US, "%.1f", mapZoomFloat)}x • Vel: ${String.format(Locale.US, "%.1f km/h", state.currentSpeedKmh)}",
                                                 fontSize = 11.sp,
                                                 color = Color(0xFF38BDF8),
                                                 fontWeight = FontWeight.SemiBold
                                             )
                                         }
+                                    } else {
+                                        Text(
+                                            text = "Mapa em Tela Cheia • Zoom ${String.format(Locale.US, "%.1f", mapZoomFloat)}x",
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 13.sp,
+                                            color = Color.White
+                                        )
                                     }
                                 }
 
@@ -661,15 +690,15 @@ fun OfflineMapScreen(
                                 ) {
                                     Icon(Icons.Default.FullscreenExit, contentDescription = "Fechar Tela Cheia", modifier = Modifier.size(18.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Sair", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text("Fechar", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
 
                             Spacer(modifier = Modifier.height(8.dp))
 
-                            // Barra Rápida de Rastreio Vivo dentro da Tela Cheia
+                            // Barra Rápida de Rastreio Vivo + Auto-Seguir + Mostrar/Ocultar Lista dentro da Tela Cheia
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
@@ -683,17 +712,17 @@ fun OfflineMapScreen(
                                         contentColor = Color.White
                                     ),
                                     shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                    modifier = Modifier.height(34.dp)
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
                                 ) {
                                     Icon(
                                         if (state.isLiveTracking) Icons.Default.DirectionsRun else Icons.Default.LocationSearching,
                                         contentDescription = null,
-                                        modifier = Modifier.size(15.dp)
+                                        modifier = Modifier.size(14.dp)
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = if (state.isLiveTracking) "Rastreio Vivo: ON" else "Iniciar Rastreio",
+                                        text = if (state.isLiveTracking) "Movimento: ON" else "Rastrear",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -712,8 +741,8 @@ fun OfflineMapScreen(
                                         if (autoFollowUser) Color(0xFF38BDF8) else Color(0xFF475569)
                                     ),
                                     shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                    modifier = Modifier.height(34.dp)
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
                                 ) {
                                     Icon(
                                         Icons.Default.GpsFixed,
@@ -723,76 +752,96 @@ fun OfflineMapScreen(
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = if (autoFollowUser) "Auto-Seguir: ON" else "Livre (Arrastar)",
+                                        text = if (autoFollowUser) "Seguindo" else "Livre",
                                         fontSize = 11.sp,
                                         color = Color.White
                                     )
+                                }
+
+                                if (navList.isNotEmpty()) {
+                                    OutlinedButton(
+                                        onClick = { showBottomPoisInFullscreen = !showBottomPoisInFullscreen },
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFBBF24)),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(32.dp)
+                                    ) {
+                                        Text(
+                                            text = if (showBottomPoisInFullscreen) "Ocultar Abrigos" else "Ver Abrigos",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFFBBF24)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
 
-                    // Carrossel Inferior de POIs em Tela Cheia para troca rápida de alvo
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .padding(bottom = 28.dp)
-                    ) {
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp),
-                            modifier = Modifier.fillMaxWidth()
+                    // Carrossel Inferior de POIs em Tela Cheia (retrátil para liberar 100% da visão das ruas)
+                    if (showBottomPoisInFullscreen && navList.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .padding(bottom = 26.dp)
                         ) {
-                            items(navList, key = { it.poiId }) { nav ->
-                                val isSel = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
-                                Surface(
-                                    color = if (isSel) Color(0xFF0F2942) else Color(0xFF090D16).copy(alpha = 0.92f),
-                                    shape = RoundedCornerShape(10.dp),
-                                    border = androidx.compose.foundation.BorderStroke(
-                                        if (isSel) 2.dp else 1.dp,
-                                        if (isSel) Color(0xFFFBBF24) else Color(0xFF334155)
-                                    ),
-                                    modifier = Modifier
-                                        .width(220.dp)
-                                        .clickable {
-                                            selectedPoiId = nav.poiId
-                                            val target = state.pois.find { it.id == nav.poiId }
-                                            if (target != null) {
-                                                autoFollowUser = false
-                                                mapCenterLat = target.latitude
-                                                mapCenterLon = target.longitude
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(navList, key = { it.poiId }) { nav ->
+                                    val isSel = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
+                                    Surface(
+                                        color = if (isSel) Color(0xFF0F2942) else Color(0xFF090D16).copy(alpha = 0.92f),
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            if (isSel) 2.dp else 1.dp,
+                                            if (isSel) Color(0xFFFBBF24) else Color(0xFF334155)
+                                        ),
+                                        modifier = Modifier
+                                            .width(220.dp)
+                                            .clickable {
+                                                selectedPoiId = nav.poiId
+                                                val target = state.pois.find { it.id == nav.poiId }
+                                                if (target != null) {
+                                                    autoFollowUser = false
+                                                    mapCenterLat = target.latitude
+                                                    mapCenterLon = target.longitude
+                                                    if (mapZoomFloat < 16.5f) mapZoomFloat = 17.0f
+                                                }
                                             }
-                                        }
-                                ) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Text(
+                                                    text = nav.poiTitle,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 12.sp,
+                                                    color = Color.White,
+                                                    maxLines = 1,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = nav.distanceFormatted,
+                                                    fontWeight = FontWeight.Black,
+                                                    fontSize = 12.sp,
+                                                    color = Color(0xFFFBBF24)
+                                                )
+                                            }
                                             Text(
-                                                text = nav.poiTitle,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 12.sp,
-                                                color = Color.White,
-                                                maxLines = 1,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text(
-                                                text = nav.distanceFormatted,
-                                                fontWeight = FontWeight.Black,
-                                                fontSize = 12.sp,
-                                                color = Color(0xFFFBBF24)
+                                                text = "${nav.cardinalDetailed} (${nav.bearingDegrees.toInt()}°) • ${nav.poiType}",
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF38BDF8),
+                                                maxLines = 1
                                             )
                                         }
-                                        Text(
-                                            text = "${nav.cardinalDetailed} (${nav.bearingDegrees.toInt()}°) • ${nav.poiType}",
-                                            fontSize = 10.sp,
-                                            color = Color(0xFF38BDF8),
-                                            maxLines = 1
-                                        )
                                     }
                                 }
                             }
@@ -832,7 +881,7 @@ private fun MapViewportBox(
     state: MainUiState,
     mapCenterLat: Double,
     mapCenterLon: Double,
-    mapZoom: Int,
+    mapZoomFloat: Float,
     autoFollowUser: Boolean,
     showStreetTiles: Boolean,
     isFullscreen: Boolean,
@@ -842,8 +891,8 @@ private fun MapViewportBox(
     isPreloadingTiles: Boolean,
     preloadStatusText: String?,
     onUpdateCachedCount: () -> Unit,
-    onPanMap: (dLat: Double, dLon: Double) -> Unit,
-    onZoomChange: (Int) -> Unit,
+    onTransformMap: (dLat: Double, dLon: Double, zoomFactor: Float) -> Unit,
+    onZoomChange: (Float) -> Unit,
     onCenterUser: () -> Unit,
     onToggleStreetTiles: () -> Unit,
     onToggleFullscreen: () -> Unit,
@@ -858,7 +907,7 @@ private fun MapViewportBox(
             context = context,
             centerLat = mapCenterLat,
             centerLon = mapCenterLon,
-            zoom = mapZoom,
+            zoomFloat = mapZoomFloat,
             userLat = state.currentLat,
             userLon = state.currentLon,
             userHeadingDegrees = state.currentHeadingDegrees,
@@ -871,10 +920,10 @@ private fun MapViewportBox(
             showStreetTiles = showStreetTiles,
             tileBitmapCache = tileBitmapCache,
             onTileCached = onUpdateCachedCount,
-            onPanLatLon = onPanMap
+            onTransformGesture = onTransformMap
         )
 
-        // Barra Superior do Mapa (Apenas na visualização normal, pois a tela cheia tem HUD dedicado)
+        // Barra Superior do Mapa (na visualização normal)
         if (!isFullscreen) {
             Row(
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -902,7 +951,7 @@ private fun MapViewportBox(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Zoom $mapZoom • $cachedTilesCount blocos salvos",
+                            text = "Zoom ${String.format(Locale.US, "%.1f", mapZoomFloat)}x • $cachedTilesCount blocos",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -918,7 +967,7 @@ private fun MapViewportBox(
                         modifier = Modifier.clickable { onToggleStreetTiles() }
                     ) {
                         Text(
-                            text = if (showStreetTiles) "Ruas + Vetor" else "Só Vetor OLED",
+                            text = if (showStreetTiles) "Ruas HD" else "Só Vetor OLED",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF38BDF8),
@@ -953,16 +1002,16 @@ private fun MapViewportBox(
             SmallFloatingButton(
                 icon = Icons.Default.Add,
                 contentDescription = "Mais Zoom",
-                onClick = { onZoomChange(mapZoom + 1) }
+                onClick = { onZoomChange(mapZoomFloat + 1.0f) }
             )
             SmallFloatingButton(
                 icon = Icons.Default.Remove,
                 contentDescription = "Menos Zoom",
-                onClick = { onZoomChange(mapZoom - 1) }
+                onClick = { onZoomChange(mapZoomFloat - 1.0f) }
             )
             SmallFloatingButton(
                 icon = if (autoFollowUser) Icons.Default.GpsFixed else Icons.Default.MyLocation,
-                contentDescription = "Centralizar e Seguir Você",
+                contentDescription = "Centralizar e Dar Zoom na Sua Rua",
                 tint = if (autoFollowUser) Color(0xFF34D399) else Color(0xFF38BDF8),
                 onClick = onCenterUser
             )
@@ -989,7 +1038,7 @@ private fun MapViewportBox(
             }
         }
 
-        // Rodapé do Mapa: Coordenadas e Legenda (no modo normal)
+        // Rodapé do Mapa: Dica de Pinça com os Dedos e Legenda
         if (!isFullscreen) {
             Row(
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -997,21 +1046,20 @@ private fun MapViewportBox(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.80f))
+                    .background(Color.Black.copy(alpha = 0.82f))
                     .padding(horizontal = 8.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = preloadStatusText
-                        ?: String.format(Locale.US, "Você: %.4f, %.4f (Arraste o mapa)", state.currentLat, state.currentLon),
+                    text = preloadStatusText ?: "Pinça (2 dedos) ou duplo-toque para Zoom nas ruas",
                     fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.SemiBold,
                     color = Color.White
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    LegendDot(color = Color(0xFF38BDF8), label = "Você/Trilha")
+                    LegendDot(color = Color(0xFF38BDF8), label = "Você")
                     LegendDot(color = Color(0xFFF59E0B), label = "Encontro")
                     LegendDot(color = Color(0xFFEF4444), label = "Hospital")
                 }
@@ -1032,11 +1080,11 @@ private fun SmallFloatingButton(
         shape = RoundedCornerShape(10.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF475569)),
         modifier = Modifier
-            .size(38.dp)
+            .size(40.dp)
             .clickable(onClick = onClick)
     ) {
         Box(contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(20.dp))
+            Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(21.dp))
         }
     }
 }
@@ -1055,16 +1103,16 @@ private fun LegendDot(color: Color, label: String) {
 }
 
 /**
- * Renderizador Cartográfico Web Mercator em Compose Canvas:
- * Combina tiles OpenStreetMap cacheados localmente com vetores geográficos do Rio de Janeiro,
- * trilha de movimentação em tempo real (breadcrumb trail) e cone direcional de rumo.
+ * Renderizador Cartográfico Web Mercator com Escala DPI Nativa e Zoom de Pinça:
+ * - Renderiza cada tile com tamanho físico `256.dp * subScale` para que os nomes das ruas fiquem grandes e legíveis no celular.
+ * - Suporta Pinça com 2 dedos (`detectTransformGestures`) e Duplo-Toque (`detectTapGestures`) para dar zoom até nível 19 (nível de quadra/rua).
  */
 @Composable
 private fun InteractiveOfflineMapCanvas(
     context: Context,
     centerLat: Double,
     centerLon: Double,
-    zoom: Int,
+    zoomFloat: Float,
     userLat: Double,
     userLon: Double,
     userHeadingDegrees: Float,
@@ -1077,37 +1125,33 @@ private fun InteractiveOfflineMapCanvas(
     showStreetTiles: Boolean,
     tileBitmapCache: MutableMap<String, ImageBitmap>,
     onTileCached: () -> Unit,
-    onPanLatLon: (dLat: Double, dLon: Double) -> Unit
+    onTransformGesture: (dLat: Double, dLon: Double, zoomFactor: Float) -> Unit
 ) {
-    val tileSize = 256.0
-    val n = 2.0.pow(zoom.toDouble())
+    val currentCenterLat by rememberUpdatedState(centerLat)
+    val currentZoomFloat by rememberUpdatedState(zoomFloat)
 
-    // Converte (lat, lon) em coordenada global de pixel Web Mercator no zoom atual
-    fun latLonToWorldPx(lat: Double, lon: Double): Pair<Double, Double> {
-        val clampedLat = lat.coerceIn(-85.0511, 85.0511)
-        val x = (lon + 180.0) / 360.0 * n * tileSize
-        val latRad = Math.toRadians(clampedLat)
-        val y = (1.0 - ln(tan(latRad) + 1.0 / cos(latRad)) / PI) / 2.0 * n * tileSize
-        return Pair(x, y)
-    }
+    // Zoom inteiro do tile OpenStreetMap (10 a 19) e fator de escala contínuo entre níveis
+    val tileZoom = zoomFloat.toInt().coerceIn(10, 19)
+    val subTileScale = 2.0.pow((zoomFloat - tileZoom).toDouble())
+    val n = 2.0.pow(tileZoom.toDouble())
 
-    val (centerWorldX, centerWorldY) = latLonToWorldPx(centerLat, centerLon)
-
-    // Dispara carregamento assíncrono dos tiles visíveis ao redor do centro
-    LaunchedEffect(centerLat, centerLon, zoom, showStreetTiles) {
+    // Dispara carregamento assíncrono dos tiles visíveis ao redor do centro no nível de zoom atual
+    LaunchedEffect(centerLat, centerLon, tileZoom, showStreetTiles) {
         if (!showStreetTiles) return@LaunchedEffect
-        val centerTileX = (centerWorldX / tileSize).toInt()
-        val centerTileY = (centerWorldY / tileSize).toInt()
+        val clampedLat = centerLat.coerceIn(-85.0511, 85.0511)
+        val latRad = Math.toRadians(clampedLat)
+        val centerTileX = ((centerLon + 180.0) / 360.0 * n).toInt()
+        val centerTileY = ((1.0 - ln(tan(latRad) + 1.0 / cos(latRad)) / PI) / 2.0 * n).toInt()
         val maxTile = n.toInt() - 1
 
         for (dx in -2..2) {
             for (dy in -2..2) {
                 val tx = (centerTileX + dx).coerceIn(0, maxTile)
                 val ty = (centerTileY + dy).coerceIn(0, maxTile)
-                val key = "$zoom/$tx/$ty"
+                val key = "$tileZoom/$tx/$ty"
                 if (!tileBitmapCache.containsKey(key)) {
                     launch(Dispatchers.IO) {
-                        val bmp = loadOrDownloadTile(context, zoom, tx, ty)
+                        val bmp = loadOrDownloadTile(context, tileZoom, tx, ty)
                         if (bmp != null) {
                             withContext(Dispatchers.Main) {
                                 tileBitmapCache[key] = bmp
@@ -1120,7 +1164,7 @@ private fun InteractiveOfflineMapCanvas(
         }
     }
 
-    // Vetores Geográficos Reais do Rio de Janeiro (Orla, Lagoa, Vias de Evacuação e Bairros)
+    // Vetores Geográficos Reais do Rio de Janeiro + Nomes de Ruas e Avenidas Principais
     val lagoaPolygon = remember {
         listOf(
             -22.9630 to -43.2170,
@@ -1134,46 +1178,111 @@ private fun InteractiveOfflineMapCanvas(
 
     val coastlineOrla = remember {
         listOf(
-            -22.8950 to -43.1800, // Porto / Mauá
-            -22.9050 to -43.1680, // Praça XV / Santos Dumont
-            -22.9200 to -43.1700, // Glória / Flamengo
-            -22.9420 to -43.1780, // Enseada de Botafogo
-            -22.9480 to -43.1630, // Urca / Pão de Açúcar
-            -22.9620 to -43.1650, // Leme
-            -22.9715 to -43.1825, // Copacabana
-            -22.9865 to -43.1900, // Arpoador
-            -22.9865 to -43.2050, // Ipanema
-            -22.9885 to -43.2260, // Leblon
-            -22.9995 to -43.2650  // São Conrado
+            -22.8950 to -43.1800,
+            -22.9050 to -43.1680,
+            -22.9200 to -43.1700,
+            -22.9420 to -43.1780,
+            -22.9480 to -43.1630,
+            -22.9620 to -43.1650,
+            -22.9715 to -43.1825,
+            -22.9865 to -43.1900,
+            -22.9865 to -43.2050,
+            -22.9885 to -43.2260,
+            -22.9995 to -43.2650
         )
     }
 
-    val arterialRoads = remember {
+    val namedRoads = remember {
         listOf(
-            listOf(
-                -22.9100 to -43.1720,
-                -22.9300 to -43.1735,
-                -22.9460 to -43.1825,
-                -22.9650 to -43.1800,
-                -22.9830 to -43.1920
+            NamedRoadVector(
+                name = "Av. Atlântica",
+                labelLat = -22.9725,
+                labelLon = -43.1835,
+                points = listOf(-22.9625 to -43.1680, -22.9715 to -43.1828, -22.9845 to -43.1892)
             ),
-            listOf(
-                -22.9780 to -43.2150,
-                -22.9610 to -43.2090,
-                -22.9310 to -43.2060,
-                -22.9120 to -43.2100
+            NamedRoadVector(
+                name = "Av. N. Sra. de Copacabana",
+                labelLat = -22.9702,
+                labelLon = -43.1862,
+                points = listOf(-22.9630 to -43.1735, -22.9702 to -43.1862, -22.9835 to -43.1918)
             ),
-            listOf(
-                -22.9015 to -43.1780,
-                -22.9070 to -43.2050,
-                -22.9130 to -43.2280,
-                -22.9245 to -43.2325
+            NamedRoadVector(
+                name = "Rua Barata Ribeiro",
+                labelLat = -22.9685,
+                labelLon = -43.1885,
+                points = listOf(-22.9635 to -43.1775, -22.9685 to -43.1885, -22.9810 to -43.1935)
             ),
-            listOf(
-                -22.9760 to -43.2290,
-                -22.9665 to -43.2230,
-                -22.9560 to -43.1990,
-                -22.9350 to -43.1880
+            NamedRoadVector(
+                name = "Praia de Botafogo",
+                labelLat = -22.9455,
+                labelLon = -43.1815,
+                points = listOf(-22.9390 to -43.1765, -22.9455 to -43.1815, -22.9520 to -43.1810)
+            ),
+            NamedRoadVector(
+                name = "Rua Voluntários da Pátria",
+                labelLat = -22.9525,
+                labelLon = -43.1885,
+                points = listOf(-22.9480 to -43.1830, -22.9525 to -43.1885, -22.9560 to -43.1975)
+            ),
+            NamedRoadVector(
+                name = "Rua São Clemente",
+                labelLat = -22.9505,
+                labelLon = -43.1915,
+                points = listOf(-22.9470 to -43.1845, -22.9505 to -43.1915, -22.9565 to -43.1992)
+            ),
+            NamedRoadVector(
+                name = "Av. Pasteur",
+                labelLat = -22.9535,
+                labelLon = -43.1715,
+                points = listOf(-22.9520 to -43.1805, -22.9535 to -43.1715, -22.9545 to -43.1655)
+            ),
+            NamedRoadVector(
+                name = "Rua Jardim Botânico",
+                labelLat = -22.9635,
+                labelLon = -43.2165,
+                points = listOf(-22.9567 to -43.1994, -22.9635 to -43.2165, -22.9755 to -43.2280)
+            ),
+            NamedRoadVector(
+                name = "Av. Epitácio Pessoa",
+                labelLat = -22.9740,
+                labelLon = -43.2020,
+                points = listOf(-22.9655 to -43.2045, -22.9740 to -43.2020, -22.9830 to -43.2065)
+            ),
+            NamedRoadVector(
+                name = "Av. Vieira Souto",
+                labelLat = -22.9862,
+                labelLon = -43.2045,
+                points = listOf(-22.9862 to -43.1930, -22.9862 to -43.2045, -22.9875 to -43.2165)
+            ),
+            NamedRoadVector(
+                name = "Rua Visconde de Pirajá",
+                labelLat = -22.9840,
+                labelLon = -43.2055,
+                points = listOf(-22.9842 to -43.1945, -22.9840 to -43.2055, -22.9850 to -43.2155)
+            ),
+            NamedRoadVector(
+                name = "Túnel Rebouças",
+                labelLat = -22.9460,
+                labelLon = -43.2075,
+                points = listOf(-22.9615 to -43.2095, -22.9460 to -43.2075, -22.9310 to -43.2060)
+            ),
+            NamedRoadVector(
+                name = "Av. Presidente Vargas",
+                labelLat = -22.9045,
+                labelLon = -43.1910,
+                points = listOf(-22.9015 to -43.1780, -22.9045 to -43.1910, -22.9095 to -43.2090)
+            ),
+            NamedRoadVector(
+                name = "Av. Maracanã",
+                labelLat = -22.9155,
+                labelLon = -43.2290,
+                points = listOf(-22.9110 to -43.2190, -22.9155 to -43.2290, -22.9245 to -43.2325)
+            ),
+            NamedRoadVector(
+                name = "Rua Conde de Bonfim",
+                labelLat = -22.9260,
+                labelLon = -43.2355,
+                points = listOf(-22.9184 to -43.2185, -22.9260 to -43.2355, -22.9380 to -43.2465)
             )
         )
     }
@@ -1184,12 +1293,16 @@ private fun InteractiveOfflineMapCanvas(
             Triple("BOTAFOGO", -22.9510, -43.1860),
             Triple("COPACABANA", -22.9700, -43.1860),
             Triple("IPANEMA", -22.9840, -43.2040),
+            Triple("LEBLON", -22.9845, -43.2215),
             Triple("LAGOA", -22.9710, -43.2105),
-            Triple("J. BOTÂNICO", -22.9650, -43.2230),
+            Triple("JARDIM BOTÂNICO", -22.9650, -43.2230),
+            Triple("HUMAITÁ", -22.9560, -43.1995),
+            Triple("URCA", -22.9485, -43.1665),
             Triple("FLAMENGO", -22.9320, -43.1760),
+            Triple("LARANJEIRAS", -22.9360, -43.1920),
             Triple("TIJUCA", -22.9240, -43.2320),
-            Triple("GÁVEA", -22.9790, -43.2330),
-            Triple("LARANJEIRAS", -22.9360, -43.1920)
+            Triple("MARACANÃ", -22.9125, -43.2300),
+            Triple("GÁVEA", -22.9790, -43.2330)
         )
     }
 
@@ -1197,18 +1310,42 @@ private fun InteractiveOfflineMapCanvas(
         modifier = Modifier
             .fillMaxSize()
             .background(if (crisisMode) Color.Black else Color(0xFF08101E))
-            .pointerInput(zoom) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    val worldScale = 2.0.pow(zoom.toDouble()) * 256.0
-                    val dLon = -(dragAmount.x / worldScale) * 360.0
-                    val dLat = (dragAmount.y / worldScale) * 360.0 * cos(Math.toRadians(centerLat))
-                    onPanLatLon(dLat, dLon)
+            // Duplo-toque para dar zoom rápido na rua
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        onTransformGesture(0.0, 0.0, 1.85f)
+                    }
+                )
+            }
+            // Pinça com 2 dedos (Zoom contínuo) + Arrastar com 1 ou 2 dedos (Pan)
+            .pointerInput(Unit) {
+                val baseTilePx = 256.dp.toPx().toDouble()
+                detectTransformGestures(panZoomLock = false) { _, pan, zoomChange, _ ->
+                    val worldScale = 2.0.pow(currentZoomFloat.toDouble()) * baseTilePx
+                    val dLon = -(pan.x / worldScale) * 360.0
+                    val dLat = (pan.y / worldScale) * 360.0 * cos(Math.toRadians(currentCenterLat))
+                    val safeZoom = zoomChange.coerceIn(0.65f, 1.55f)
+                    onTransformGesture(dLat, dLon, safeZoom)
                 }
             }
     ) {
         val w = size.width
         val h = size.height
+
+        // Tamanho físico real do tile na tela do celular (256.dp escalado pelo zoom fracionário):
+        // Garante que os nomes das ruas fiquem grandes e nítidos em telas FullHD/QHD!
+        val tileSizePx = 256.dp.toPx() * subTileScale
+
+        fun latLonToWorldPx(lat: Double, lon: Double): Pair<Double, Double> {
+            val clampedLat = lat.coerceIn(-85.0511, 85.0511)
+            val x = (lon + 180.0) / 360.0 * n * tileSizePx
+            val latRad = Math.toRadians(clampedLat)
+            val y = (1.0 - ln(tan(latRad) + 1.0 / cos(latRad)) / PI) / 2.0 * n * tileSizePx
+            return Pair(x, y)
+        }
+
+        val (centerWorldX, centerWorldY) = latLonToWorldPx(centerLat, centerLon)
 
         fun toScreen(lat: Double, lon: Double): Offset {
             val (wx, wy) = latLonToWorldPx(lat, lon)
@@ -1217,27 +1354,27 @@ private fun InteractiveOfflineMapCanvas(
             return Offset(sx, sy)
         }
 
-        // 1. Camada de Tiles OpenStreetMap (se habilitada e disponível no cache)
+        // 1. Camada de Tiles OpenStreetMap (com suporte a fallback de zoom pai enquanto carrega o zoom mais alto)
         if (showStreetTiles) {
-            val centerTileX = (centerWorldX / tileSize).toInt()
-            val centerTileY = (centerWorldY / tileSize).toInt()
+            val centerTileX = (centerWorldX / tileSizePx).toInt()
+            val centerTileY = (centerWorldY / tileSizePx).toInt()
             val maxTile = n.toInt() - 1
 
-            for (dx in -3..3) {
-                for (dy in -3..3) {
+            for (dx in -2..2) {
+                for (dy in -2..2) {
                     val tx = centerTileX + dx
                     val ty = centerTileY + dy
                     if (tx in 0..maxTile && ty in 0..maxTile) {
-                        val key = "$zoom/$tx/$ty"
+                        val key = "$tileZoom/$tx/$ty"
                         val bmp = tileBitmapCache[key]
                         if (bmp != null) {
-                            val tileScreenX = (tx * tileSize - centerWorldX + w / 2.0).roundToInt()
-                            val tileScreenY = (ty * tileSize - centerWorldY + h / 2.0).roundToInt()
+                            val tileScreenX = (tx * tileSizePx - centerWorldX + w / 2.0).roundToInt()
+                            val tileScreenY = (ty * tileSizePx - centerWorldY + h / 2.0).roundToInt()
                             drawImage(
                                 image = bmp,
                                 dstOffset = IntOffset(tileScreenX, tileScreenY),
-                                dstSize = IntSize(tileSize.roundToInt() + 1, tileSize.roundToInt() + 1),
-                                alpha = if (crisisMode) 0.50f else 0.85f
+                                dstSize = IntSize(tileSizePx.roundToInt() + 2, tileSizePx.roundToInt() + 2),
+                                alpha = if (crisisMode) 0.65f else 0.96f
                             )
                         }
                     }
@@ -1245,12 +1382,12 @@ private fun InteractiveOfflineMapCanvas(
             }
         }
 
-        // 2. Grade Cartográfica Tática de Coordenadas
-        val gridStep = 64.dp.toPx()
+        // 2. Grade Cartográfica Tática Discreta
+        val gridStep = 72.dp.toPx()
         var gx = (w / 2f) % gridStep
         while (gx < w) {
             drawLine(
-                color = Color(0xFF1E293B).copy(alpha = 0.45f),
+                color = Color(0xFF1E293B).copy(alpha = 0.25f),
                 start = Offset(gx, 0f),
                 end = Offset(gx, h),
                 strokeWidth = 1f
@@ -1260,7 +1397,7 @@ private fun InteractiveOfflineMapCanvas(
         var gy = (h / 2f) % gridStep
         while (gy < h) {
             drawLine(
-                color = Color(0xFF1E293B).copy(alpha = 0.45f),
+                color = Color(0xFF1E293B).copy(alpha = 0.25f),
                 start = Offset(0f, gy),
                 end = Offset(w, gy),
                 strokeWidth = 1f
@@ -1268,7 +1405,7 @@ private fun InteractiveOfflineMapCanvas(
             gy += gridStep
         }
 
-        // 3. Cartografia Vetorial Offline do Rio de Janeiro (Lagoa Rodrigo de Freitas)
+        // 3. Cartografia Vetorial Offline do Rio de Janeiro (Lagoa Rodrigo de Freitas + Orla)
         val lagoaPath = Path().apply {
             lagoaPolygon.forEachIndexed { idx, (lat, lon) ->
                 val pt = toScreen(lat, lon)
@@ -1278,15 +1415,14 @@ private fun InteractiveOfflineMapCanvas(
         }
         drawPath(
             path = lagoaPath,
-            color = Color(0xFF0284C7).copy(alpha = 0.30f)
+            color = Color(0xFF0284C7).copy(alpha = if (showStreetTiles) 0.18f else 0.35f)
         )
         drawPath(
             path = lagoaPath,
-            color = Color(0xFF38BDF8).copy(alpha = 0.65f),
+            color = Color(0xFF38BDF8).copy(alpha = 0.60f),
             style = Stroke(width = 1.5.dp.toPx())
         )
 
-        // Linha Costeira / Orla do Rio de Janeiro
         val coastPath = Path().apply {
             coastlineOrla.forEachIndexed { idx, (lat, lon) ->
                 val pt = toScreen(lat, lon)
@@ -1295,38 +1431,56 @@ private fun InteractiveOfflineMapCanvas(
         }
         drawPath(
             path = coastPath,
-            color = Color(0xFF0EA5E9).copy(alpha = 0.65f),
-            style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            color = Color(0xFF0EA5E9).copy(alpha = 0.55f),
+            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
 
-        // Corredores Viários / Rotas de Evacuação Principais
-        arterialRoads.forEach { road ->
+        // Vias e Nomes das Ruas Vetoriais (Sempre disponíveis, mesmo 100% sem cache de tile)
+        val roadLabelPaint = Paint().apply {
+            color = android.graphics.Color.argb(245, 254, 240, 138) // Amarelo claro de alta leitura
+            textSize = 11.5.sp.toPx()
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
+        }
+
+        namedRoads.forEach { road ->
             val roadPath = Path().apply {
-                road.forEachIndexed { idx, (lat, lon) ->
+                road.points.forEachIndexed { idx, (lat, lon) ->
                     val pt = toScreen(lat, lon)
                     if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
                 }
             }
-            drawPath(
-                path = roadPath,
-                color = Color(0xFF64748B).copy(alpha = 0.6f),
-                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
-            )
+            if (!showStreetTiles) {
+                drawPath(
+                    path = roadPath,
+                    color = Color(0xFF64748B).copy(alpha = 0.75f),
+                    style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+                )
+            }
+            // Exibe os nomes das avenidas/ruas vetoriais quando o usuário aproxima o zoom (>= 13.5x) ou no modo só vetor
+            if (zoomFloat >= 13.5f || !showStreetTiles) {
+                val lblPt = toScreen(road.labelLat, road.labelLon)
+                if (lblPt.x in 20f..(w - 20f) && lblPt.y in 20f..(h - 20f)) {
+                    drawContext.canvas.nativeCanvas.drawText(road.name, lblPt.x, lblPt.y, roadLabelPaint)
+                }
+            }
         }
 
         // Rótulos de Bairros do Rio de Janeiro
-        val labelPaint = Paint().apply {
-            color = android.graphics.Color.argb(190, 203, 213, 225)
-            textSize = 10.sp.toPx()
+        val neighborhoodPaint = Paint().apply {
+            color = android.graphics.Color.argb(220, 241, 245, 249)
+            textSize = if (zoomFloat >= 15f) 12.sp.toPx() else 10.sp.toPx()
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
             isAntiAlias = true
-            setShadowLayer(3f, 0f, 1f, android.graphics.Color.BLACK)
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
         }
         neighborhoods.forEach { (name, lat, lon) ->
             val pt = toScreen(lat, lon)
             if (pt.x in 0f..w && pt.y in 0f..h) {
-                drawContext.canvas.nativeCanvas.drawText(name, pt.x, pt.y, labelPaint)
+                drawContext.canvas.nativeCanvas.drawText(name, pt.x, pt.y, neighborhoodPaint)
             }
         }
 
@@ -1337,25 +1491,22 @@ private fun InteractiveOfflineMapCanvas(
                 val pt = toScreen(tLat, tLon)
                 if (index == 0) trailPath.moveTo(pt.x, pt.y) else trailPath.lineTo(pt.x, pt.y)
             }
-            // Sombra luminosa da trilha
             drawPath(
                 path = trailPath,
-                color = Color(0xFF0284C7).copy(alpha = 0.45f),
-                style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                color = Color(0xFF0284C7).copy(alpha = 0.50f),
+                style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
-            // Linha principal da trilha percorrida
             drawPath(
                 path = trailPath,
                 color = Color(0xFF38BDF8),
-                style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = 3.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
-            // Pontos históricos (breadcrumbs)
             movementTrail.forEach { (tLat, tLon) ->
                 val pt = toScreen(tLat, tLon)
                 if (pt.x in 0f..w && pt.y in 0f..h) {
                     drawCircle(
                         color = Color.White,
-                        radius = 2.5.dp.toPx(),
+                        radius = 2.8.dp.toPx(),
                         center = pt
                     )
                 }
@@ -1370,7 +1521,7 @@ private fun InteractiveOfflineMapCanvas(
                 color = Color(0xFFFBBF24),
                 start = userScreen,
                 end = targetScreen,
-                strokeWidth = 2.8.dp.toPx(),
+                strokeWidth = 3.dp.toPx(),
                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(16f, 10f), 0f)
             )
         }
@@ -1378,10 +1529,10 @@ private fun InteractiveOfflineMapCanvas(
         // 6. Marcadores Geográficos de todos os POIs do Banco Room
         val poiLabelPaint = Paint().apply {
             color = android.graphics.Color.WHITE
-            textSize = 11.sp.toPx()
+            textSize = 12.sp.toPx()
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             isAntiAlias = true
-            setShadowLayer(5f, 0f, 1f, android.graphics.Color.BLACK)
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
         }
 
         pois.forEach { poi ->
@@ -1396,26 +1547,26 @@ private fun InteractiveOfflineMapCanvas(
 
                 if (isFocused) {
                     drawCircle(
-                        color = pinColor.copy(alpha = 0.35f),
-                        radius = 18.dp.toPx(),
+                        color = pinColor.copy(alpha = 0.38f),
+                        radius = 19.dp.toPx(),
                         center = pt
                     )
                 }
                 drawCircle(
                     color = Color.Black,
-                    radius = if (isFocused) 9.dp.toPx() else 7.dp.toPx(),
+                    radius = if (isFocused) 9.5.dp.toPx() else 7.5.dp.toPx(),
                     center = pt
                 )
                 drawCircle(
                     color = pinColor,
-                    radius = if (isFocused) 7.dp.toPx() else 5.dp.toPx(),
+                    radius = if (isFocused) 7.5.dp.toPx() else 5.5.dp.toPx(),
                     center = pt
                 )
 
-                val shortLabel = poi.title.substringBefore(" -").take(20)
+                val shortLabel = poi.title.substringBefore(" -").take(22)
                 drawContext.canvas.nativeCanvas.drawText(
                     shortLabel,
-                    pt.x + 11.dp.toPx(),
+                    pt.x + 12.dp.toPx(),
                     pt.y + 4.dp.toPx(),
                     poiLabelPaint
                 )
@@ -1424,22 +1575,21 @@ private fun InteractiveOfflineMapCanvas(
 
         // 7. Pino da Posição Atual do Usuário + Cone de Direção de Movimento
         if (userScreen.x in -60f..(w + 60f) && userScreen.y in -60f..(h + 60f)) {
-            // Halo de precisão / rastreio ativo
             drawCircle(
-                color = if (isLiveTracking) Color(0xFF10B981).copy(alpha = 0.28f) else Color(0xFF0284C7).copy(alpha = 0.28f),
+                color = if (isLiveTracking) Color(0xFF10B981).copy(alpha = 0.30f) else Color(0xFF0284C7).copy(alpha = 0.30f),
                 radius = if (userAccuracyMeters > 0f) userAccuracyMeters.coerceIn(18f, 42f).dp.toPx() else 22.dp.toPx(),
                 center = userScreen
             )
 
             // Cone / Seta indicando para onde o usuário está se movendo
             val headingRad = Math.toRadians((userHeadingDegrees - 90f).toDouble())
-            val tipLength = 22.dp.toPx()
+            val tipLength = 24.dp.toPx()
             val tipX = userScreen.x + (cos(headingRad) * tipLength).toFloat()
             val tipY = userScreen.y + (sin(headingRad) * tipLength).toFloat()
 
             val leftWingRad = Math.toRadians((userHeadingDegrees - 90f - 28f).toDouble())
             val rightWingRad = Math.toRadians((userHeadingDegrees - 90f + 28f).toDouble())
-            val wingLen = 11.dp.toPx()
+            val wingLen = 12.dp.toPx()
 
             val conePath = Path().apply {
                 moveTo(tipX, tipY)
@@ -1460,12 +1610,12 @@ private fun InteractiveOfflineMapCanvas(
 
             drawCircle(
                 color = Color.White,
-                radius = 8.dp.toPx(),
+                radius = 8.5.dp.toPx(),
                 center = userScreen
             )
             drawCircle(
                 color = if (isLiveTracking) Color(0xFF10B981) else Color(0xFF0284C7),
-                radius = 5.5.dp.toPx(),
+                radius = 6.dp.toPx(),
                 center = userScreen
             )
         }
@@ -1519,8 +1669,8 @@ private suspend fun preloadRegionTiles(
     cache: MutableMap<String, ImageBitmap>
 ): Int = withContext(Dispatchers.IO) {
     var count = 0
-    val zoomsToCache = listOf(zoom, (zoom + 1).coerceAtMost(16))
-    for (z in zoomsToCache) {
+    val zoomsToCache = listOf(zoom.coerceIn(12, 18), (zoom + 1).coerceIn(13, 18))
+    for (z in zoomsToCache.distinct()) {
         val n = 2.0.pow(z.toDouble())
         val latRad = Math.toRadians(centerLat.coerceIn(-85.0, 85.0))
         val cx = ((centerLon + 180.0) / 360.0 * n).toInt()
