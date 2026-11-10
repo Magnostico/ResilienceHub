@@ -11,6 +11,10 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- Network state required by MapLibre ConnectivityReceiver & optional tile caching -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Haptic feedback for tactile alert cues in low-visibility situations -->
     <uses-permission android:name="android.permission.VIBRATE" />
 

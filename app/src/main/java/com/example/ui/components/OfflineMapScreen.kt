@@ -1,12 +1,13 @@
 package com.example.ui.components
 
 import android.content.Context
-import android.util.Log
-import android.view.View
+import android.graphics.BitmapFactory
+import android.graphics.Paint
+import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,72 +19,47 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.data.entity.MapPoiEntity
 import com.example.domain.RationingAndAlertEngine
 import com.example.ui.MainUiState
 import com.example.ui.MainViewModel
-import org.maplibre.android.MapLibre
-import org.maplibre.android.annotations.MarkerOptions
-import org.maplibre.android.camera.CameraPosition
-import org.maplibre.android.camera.CameraUpdateFactory
-import org.maplibre.android.geometry.LatLng
-import org.maplibre.android.maps.MapLibreMap
-import org.maplibre.android.maps.MapView
-import org.maplibre.android.maps.Style
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
+import kotlin.math.*
 
-private const val TAG = "OfflineMapScreen"
-
-// Estilo tático escuro embutido para renderização offline
-private val OFFLINE_DARK_STYLE_JSON = """
-{
-  "version": 8,
-  "name": "ResilienceHub Tactical Offline",
-  "sources": {
-    "open-street-map": {
-      "type": "raster",
-      "tiles": [
-        "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-      ],
-      "tileSize": 256,
-      "attribution": "© OpenStreetMap contributors"
-    }
-  },
-  "layers": [
-    {
-      "id": "background-crisis",
-      "type": "background",
-      "paint": {
-        "background-color": "#090d16"
-      }
-    },
-    {
-      "id": "osm-raster-layer",
-      "type": "raster",
-      "source": "open-street-map",
-      "minzoom": 0,
-      "maxzoom": 19,
-      "paint": {
-        "raster-opacity": 0.85,
-        "raster-contrast": 0.2
-      }
-    }
-  ]
-}
-""".trimIndent()
-
+/**
+ * Motor Cartográfico Híbrido 100% Kotlin/Compose (Zero dependências C++ / Zero Crash):
+ * 1. Projeção Web Mercator real com suporte a Pan (arrastar) e Zoom (níveis 10 a 17).
+ * 2. Cache automático de Tiles OpenStreetMap em disco local (filesDir/osm_tiles/{z}/{x}/{y}.png).
+ * 3. Cartografia Vetorial Offline Embutida do Rio de Janeiro (Orla, Lagoa, Baía de Guanabara,
+ *    Maciço da Tijuca, corredores de evacuação e bairros) garantindo mapa visível mesmo sem internet.
+ */
 @Composable
 fun OfflineMapScreen(
     state: MainUiState,
@@ -92,60 +68,34 @@ fun OfflineMapScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
     val crisisMode = state.crisisMode
     val navList = state.poiNavigationList
 
-    // Inicialização síncrona segura do MapLibre antes de renderizar qualquer View
-    val isMapLibreReady = remember {
-        try {
-            MapLibre.getInstance(context)
-            true
-        } catch (t: Throwable) {
-            Log.e(TAG, "Falha ao inicializar MapLibre nativo", t)
-            false
-        }
-    }
-
     var selectedPoiId by remember { mutableStateOf<Long?>(null) }
     val focusedPoi = navList.find { it.poiId == selectedPoiId } ?: navList.firstOrNull()
+    val focusedPoiEntity = state.pois.find { it.id == focusedPoi?.poiId }
 
-    var mapLibreInstance by remember { mutableStateOf<MapLibreMap?>(null) }
-    var activeMapView by remember { mutableStateOf<MapView?>(null) }
-    var mapInitError by remember { mutableStateOf<String?>(if (!isMapLibreReady) "Biblioteca nativa MapLibre indisponível neste aparelho" else null) }
+    // Estado da câmera do mapa (Web Mercator)
+    var mapCenterLat by remember { mutableDoubleStateOf(state.currentLat) }
+    var mapCenterLon by remember { mutableDoubleStateOf(state.currentLon) }
+    var mapZoom by remember { mutableIntStateOf(13) }
     var isMapExpanded by remember { mutableStateOf(false) }
+    var showStreetTiles by remember { mutableStateOf(true) }
 
-    // Gerenciamento seguro do ciclo de vida do MapView
-    DisposableEffect(lifecycleOwner, activeMapView) {
-        val mv = activeMapView
-        if (mv == null) {
-            onDispose { }
-        } else {
-            val observer = LifecycleEventObserver { _, event ->
-                try {
-                    when (event) {
-                        Lifecycle.Event.ON_START -> mv.onStart()
-                        Lifecycle.Event.ON_RESUME -> mv.onResume()
-                        Lifecycle.Event.ON_PAUSE -> mv.onPause()
-                        Lifecycle.Event.ON_STOP -> mv.onStop()
-                        Lifecycle.Event.ON_DESTROY -> mv.onDestroy()
-                        else -> {}
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Exceção no ciclo de vida MapView: $event", e)
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose {
-                lifecycleOwner.lifecycle.removeObserver(observer)
-                try {
-                    mv.onDestroy()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Erro ao destruir MapView", e)
-                }
-            }
-        }
+    // Sincroniza quando o GPS Pulso atualiza a coordenada do usuário
+    LaunchedEffect(state.currentLat, state.currentLon) {
+        mapCenterLat = state.currentLat
+        mapCenterLon = state.currentLon
     }
+
+    // Cache em memória e status de download de tiles offline
+    val tileBitmapCache = remember { mutableStateMapOf<String, ImageBitmap>() }
+    var cachedTilesCount by remember {
+        mutableIntStateOf(countCachedTilesOnDisk(context))
+    }
+    var isPreloadingTiles by remember { mutableStateOf(false) }
+    var preloadStatusText by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = modifier
@@ -168,13 +118,12 @@ fun OfflineMapScreen(
                 .padding(vertical = 6.dp)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                // Header com botão de GPS Pulso
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 Icons.Default.Explore,
@@ -183,28 +132,29 @@ fun OfflineMapScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Bússola de Emergência Offline", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(
+                                "Bússola & Mapa Offline",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
                         }
                         Text(
                             text = state.gpsProviderInfo,
                             fontSize = 10.sp,
-                            color = Color(0xFF0284C7),
+                            color = Color(0xFF38BDF8),
                             fontWeight = FontWeight.Medium
                         )
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Button(
                             onClick = {
                                 viewModel.triggerSingleShotGpsPulse()
-                                mapLibreInstance?.let { map ->
-                                    try {
-                                        val userPos = LatLng(state.currentLat, state.currentLon)
-                                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(userPos, 14.0))
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Erro ao animar câmera para GPS", e)
-                                    }
-                                }
+                                mapCenterLat = state.currentLat
+                                mapCenterLon = state.currentLon
                             },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             modifier = Modifier.testTag("btn_gps_pulse_map")
@@ -242,20 +192,19 @@ fun OfflineMapScreen(
                             )
                             .padding(8.dp)
                     ) {
-                        // Bússola Visual Renderizada
                         Box(
                             contentAlignment = Alignment.Center,
-                            modifier = Modifier.size(54.dp)
+                            modifier = Modifier.size(52.dp)
                         ) {
-                            Canvas(modifier = Modifier.size(54.dp)) {
+                            Canvas(modifier = Modifier.size(52.dp)) {
                                 drawCircle(
                                     color = if (crisisMode) Color(0xFF27272A) else Color.LightGray,
                                     style = Stroke(width = 2.dp.toPx())
                                 )
                                 drawLine(
-                                    color = Color.Gray,
-                                    start = Offset(size.width / 2, 4.dp.toPx()),
-                                    end = Offset(size.width / 2, 8.dp.toPx()),
+                                    color = Color(0xFFEF4444),
+                                    start = Offset(size.width / 2, 3.dp.toPx()),
+                                    end = Offset(size.width / 2, 9.dp.toPx()),
                                     strokeWidth = 2.dp.toPx()
                                 )
                             }
@@ -264,15 +213,18 @@ fun OfflineMapScreen(
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier
-                                    .size(28.dp)
+                                    .size(26.dp)
                                     .rotate(focusedPoi.bearingDegrees.toFloat())
                             )
                         }
 
-                        // Informações do Alvo
-                        Column(modifier = Modifier.padding(start = 10.dp).weight(1f)) {
+                        Column(
+                            modifier = Modifier
+                                .padding(start = 10.dp)
+                                .weight(1f)
+                        ) {
                             Text(
-                                text = "Rumo ao Alvo:",
+                                text = "Rumo ao Alvo Selecionado:",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -283,15 +235,15 @@ fun OfflineMapScreen(
                                 maxLines = 1,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                            val walkMinutes = (focusedPoi.distanceMeters / 75.0).roundToInt().coerceAtLeast(1)
                             Text(
-                                text = "${focusedPoi.cardinalDetailed} • Azimute ${focusedPoi.bearingDegrees.toInt()}°",
+                                text = "${focusedPoi.cardinalDetailed} • ${focusedPoi.bearingDegrees.toInt()}° (~$walkMinutes min a pé)",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
 
-                        // Distância Haversine
                         Column(horizontalAlignment = Alignment.End) {
                             Text(
                                 text = focusedPoi.distanceFormatted,
@@ -300,8 +252,8 @@ fun OfflineMapScreen(
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Text(
-                                text = "linha reta",
-                                fontSize = 10.sp,
+                                text = "Haversine",
+                                fontSize = 9.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -310,10 +262,10 @@ fun OfflineMapScreen(
             }
         }
 
-        // --- 2. MAPA OFFLINE REAL (À PROVA DE FALHAS / CRASH-PROOF) ---
+        // --- 2. MAPA INTERATIVO VETORIAL & RASTER OFFLINE (100% KOTLIN) ---
         Card(
             colors = CardDefaults.cardColors(
-                containerColor = if (crisisMode) Color.Black else Color(0xFF0F172A)
+                containerColor = if (crisisMode) Color.Black else Color(0xFF070B14)
             ),
             shape = RoundedCornerShape(12.dp),
             border = androidx.compose.foundation.BorderStroke(
@@ -322,88 +274,33 @@ fun OfflineMapScreen(
             ),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(if (isMapExpanded) 320.dp else 190.dp)
+                .height(if (isMapExpanded) 340.dp else 210.dp)
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                if (mapInitError == null) {
-                    // Tenta renderizar o MapView real do MapLibre Native
-                    AndroidView(
-                        factory = { ctx ->
-                            try {
-                                MapLibre.getInstance(ctx)
-                                val mv = MapView(ctx)
-                                mv.onCreate(null)
-                                mv.getMapAsync { map ->
-                                    mapLibreInstance = map
-                                    try {
-                                        val localMbtiles = File(ctx.filesDir, "rio_janeiro.mbtiles")
-                                        val localStyle = File(ctx.filesDir, "style.json")
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(12.dp))
+            ) {
+                InteractiveOfflineMapCanvas(
+                    context = context,
+                    centerLat = mapCenterLat,
+                    centerLon = mapCenterLon,
+                    zoom = mapZoom,
+                    userLat = state.currentLat,
+                    userLon = state.currentLon,
+                    pois = state.pois,
+                    focusedPoi = focusedPoiEntity,
+                    crisisMode = crisisMode,
+                    showStreetTiles = showStreetTiles,
+                    tileBitmapCache = tileBitmapCache,
+                    onTileCached = { cachedTilesCount = countCachedTilesOnDisk(context) },
+                    onPanLatLon = { dLat, dLon ->
+                        mapCenterLat = (mapCenterLat + dLat).coerceIn(-23.15, -22.70)
+                        mapCenterLon = (mapCenterLon + dLon).coerceIn(-43.80, -42.95)
+                    }
+                )
 
-                                        val styleBuilder = when {
-                                            localStyle.exists() -> Style.Builder().fromUri("file://${localStyle.absolutePath}")
-                                            localMbtiles.exists() -> Style.Builder().fromJson(OFFLINE_DARK_STYLE_JSON)
-                                            else -> Style.Builder().fromJson(OFFLINE_DARK_STYLE_JSON)
-                                        }
-
-                                        map.setStyle(styleBuilder) {
-                                            try {
-                                                map.clear()
-
-                                                // Posição do Usuário (GPS Pulso)
-                                                val userLocation = LatLng(state.currentLat, state.currentLon)
-                                                map.addMarker(
-                                                    MarkerOptions()
-                                                        .position(userLocation)
-                                                        .title("Minha Posição")
-                                                        .snippet("GPS Pulso: ${state.currentLat}, ${state.currentLon}")
-                                                )
-
-                                                // Marcadores dos POIs salvos no Room
-                                                state.pois.forEach { poi ->
-                                                    map.addMarker(
-                                                        MarkerOptions()
-                                                            .position(LatLng(poi.latitude, poi.longitude))
-                                                            .title(poi.title)
-                                                            .snippet("${poi.type.name} • ${poi.address}")
-                                                    )
-                                                }
-
-                                                val initialCamera = CameraPosition.Builder()
-                                                    .target(userLocation)
-                                                    .zoom(12.5)
-                                                    .build()
-                                                map.cameraPosition = initialCamera
-                                            } catch (e: Exception) {
-                                                Log.e(TAG, "Erro ao popular marcadores no mapa", e)
-                                            }
-                                        }
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Erro ao configurar estilo no MapLibre", e)
-                                    }
-                                }
-                                activeMapView = mv
-                                mv
-                            } catch (t: Throwable) {
-                                Log.e(TAG, "Exceção crítica ao criar MapView", t)
-                                mapInitError = t.localizedMessage ?: "Erro na GPU/OpenGL do dispositivo"
-                                View(ctx)
-                            }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-
-                // Fallback tático elegante se a aceleração gráfica nativa falhar ou estiver em inicialização
-                if (mapInitError != null) {
-                    TacticalRadarFallback(
-                        currentLat = state.currentLat,
-                        currentLon = state.currentLon,
-                        navList = navList,
-                        errorMessage = mapInitError
-                    )
-                }
-
-                // Badge sobreposta de status
+                // Barra Superior do Mapa: Status Offline + Botão Baixar Região
                 Row(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
@@ -412,28 +309,127 @@ fun OfflineMapScreen(
                         .padding(8.dp)
                 ) {
                     Surface(
-                        color = Color.Black.copy(alpha = 0.85f),
-                        shape = RoundedCornerShape(4.dp)
+                        color = Color.Black.copy(alpha = 0.82f),
+                        shape = RoundedCornerShape(6.dp)
                     ) {
-                        Text(
-                            text = if (mapInitError == null) "MapLibre Native SDK • Vetores Offline" else "Modo Tático Vetorial Ativo",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .background(Color(0xFF10B981), CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Mapa RJ • Zoom $mapZoom • $cachedTilesCount tiles salvos",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
                     }
 
-                    Surface(
-                        color = Color.Black.copy(alpha = 0.85f),
-                        shape = RoundedCornerShape(4.dp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        // Alternar Camada Rua / Vetor Tático
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.82f),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.clickable { showStreetTiles = !showStreetTiles }
+                        ) {
+                            Text(
+                                text = if (showStreetTiles) "Ruas + Vetor" else "Só Vetor OLED",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF38BDF8),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+
+                        // Pré-baixar tiles da região atual para uso 100% offline
+                        Surface(
+                            color = Color(0xFF0284C7).copy(alpha = 0.9f),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.clickable(enabled = !isPreloadingTiles) {
+                                scope.launch {
+                                    isPreloadingTiles = true
+                                    preloadStatusText = "Baixando mapa local..."
+                                    val downloaded = preloadRegionTiles(
+                                        context = context,
+                                        centerLat = mapCenterLat,
+                                        centerLon = mapCenterLon,
+                                        zoom = mapZoom,
+                                        cache = tileBitmapCache
+                                    )
+                                    cachedTilesCount = countCachedTilesOnDisk(context)
+                                    preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos salvos offline" else "✓ Região em cache"
+                                    isPreloadingTiles = false
+                                }
+                            }
+                        ) {
+                            Text(
+                                text = if (isPreloadingTiles) "Salvando..." else "⬇ Salvar Offline",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Controles Flutuantes de Zoom (+ / - / Centralizar GPS) à direita
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 8.dp)
+                ) {
+                    SmallFloatingButton(
+                        icon = Icons.Default.Add,
+                        contentDescription = "Mais Zoom",
+                        onClick = { if (mapZoom < 17) mapZoom++ }
+                    )
+                    SmallFloatingButton(
+                        icon = Icons.Default.Remove,
+                        contentDescription = "Menos Zoom",
+                        onClick = { if (mapZoom > 10) mapZoom-- }
+                    )
+                    SmallFloatingButton(
+                        icon = Icons.Default.MyLocation,
+                        contentDescription = "Centralizar no Usuário",
+                        tint = Color(0xFF38BDF8),
+                        onClick = {
+                            mapCenterLat = state.currentLat
+                            mapCenterLon = state.currentLon
+                            mapZoom = 14
+                        }
+                    )
+                }
+
+                // Rodapé do Mapa: Coordenadas e Legenda
+                Row(
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.72f))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = preloadStatusText ?: String.format(Locale.US, "Centro: %.4f, %.4f (Arraste para mover)", mapCenterLat, mapCenterLon),
+                        fontSize = 9.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            text = "Rio de Janeiro • 100% Offline",
-                            fontSize = 10.sp,
-                            color = Color(0xFF10B981),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
+                        LegendDot(color = Color(0xFF38BDF8), label = "Você")
+                        LegendDot(color = Color(0xFFF59E0B), label = "Encontro")
+                        LegendDot(color = Color(0xFFEF4444), label = "Hospital/BM")
                     }
                 }
             }
@@ -441,21 +437,14 @@ fun OfflineMapScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // --- 3. LISTA DE PONTOS DE ENCONTRO E APOIO COM FOCO INTERATIVO ---
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 4.dp)
-        ) {
-            Text(
-                text = "Pontos de Apoio e Encontro (Toque para focar no mapa):",
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
+        // --- 3. LISTA DE PONTOS DE ENCONTRO E APOIO COM FOCO NO MAPA ---
+        Text(
+            text = "Pontos Seguros e Abrigos (Toque para focar no mapa):",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
 
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -471,16 +460,10 @@ fun OfflineMapScreen(
                     onClick = {
                         selectedPoiId = nav.poiId
                         val targetPoi = state.pois.find { it.id == nav.poiId }
-                        if (targetPoi != null && mapLibreInstance != null) {
-                            try {
-                                val targetLocation = LatLng(targetPoi.latitude, targetPoi.longitude)
-                                mapLibreInstance?.animateCamera(
-                                    CameraUpdateFactory.newLatLngZoom(targetLocation, 14.5),
-                                    1000
-                                )
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Erro ao focar POI no mapa", e)
-                            }
+                        if (targetPoi != null) {
+                            mapCenterLat = targetPoi.latitude
+                            mapCenterLon = targetPoi.longitude
+                            if (mapZoom < 14) mapZoom = 14
                         }
                     }
                 )
@@ -489,63 +472,473 @@ fun OfflineMapScreen(
     }
 }
 
+@Composable
+private fun SmallFloatingButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    tint: Color = Color.White,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.82f),
+        shape = RoundedCornerShape(8.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
+        modifier = Modifier
+            .size(32.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+@Composable
+private fun LegendDot(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .background(color, CircleShape)
+        )
+        Spacer(modifier = Modifier.width(3.dp))
+        Text(text = label, fontSize = 9.sp, color = Color.LightGray)
+    }
+}
+
 /**
- * Radar Tático Vetorial: garante que mesmo em dispositivos com falha de OpenGL/Drivers
- * ou ausência de sinal de mapa, o usuário tenha visualização tática de suas coordenadas e alvos.
+ * Renderizador Cartográfico Web Mercator em Compose Canvas:
+ * Combina tiles OpenStreetMap cacheados localmente com vetores geográficos do Rio de Janeiro.
  */
 @Composable
-private fun TacticalRadarFallback(
-    currentLat: Double,
-    currentLon: Double,
-    navList: List<RationingAndAlertEngine.PoiNavigationInfo>,
-    errorMessage: String?
+private fun InteractiveOfflineMapCanvas(
+    context: Context,
+    centerLat: Double,
+    centerLon: Double,
+    zoom: Int,
+    userLat: Double,
+    userLon: Double,
+    pois: List<MapPoiEntity>,
+    focusedPoi: MapPoiEntity?,
+    crisisMode: Boolean,
+    showStreetTiles: Boolean,
+    tileBitmapCache: MutableMap<String, ImageBitmap>,
+    onTileCached: () -> Unit,
+    onPanLatLon: (dLat: Double, dLon: Double) -> Unit
 ) {
-    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF090D16))) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            val center = Offset(w / 2, h / 2)
+    val tileSize = 256.0
+    val n = 2.0.pow(zoom.toDouble())
 
-            // Círculos concêntricos do radar tático
-            drawCircle(Color(0xFF1E293B), radius = h * 0.45f, center = center, style = Stroke(1f))
-            drawCircle(Color(0xFF1E293B), radius = h * 0.30f, center = center, style = Stroke(1f))
-            drawCircle(Color(0xFF1E293B), radius = h * 0.15f, center = center, style = Stroke(1f))
+    // Converte (lat, lon) em coordenada global de pixel Web Mercator no zoom atual
+    fun latLonToWorldPx(lat: Double, lon: Double): Pair<Double, Double> {
+        val clampedLat = lat.coerceIn(-85.0511, 85.0511)
+        val x = (lon + 180.0) / 360.0 * n * tileSize
+        val latRad = Math.toRadians(clampedLat)
+        val y = (1.0 - ln(tan(latRad) + 1.0 / cos(latRad)) / PI) / 2.0 * n * tileSize
+        return Pair(x, y)
+    }
 
-            // Eixos cardeais N-S e L-O
-            drawLine(Color(0xFF1E293B), Offset(w / 2, 0f), Offset(w / 2, h), 1f)
-            drawLine(Color(0xFF1E293B), Offset(0f, h / 2), Offset(w, h / 2), 1f)
+    val (centerWorldX, centerWorldY) = latLonToWorldPx(centerLat, centerLon)
 
-            // Posição central do usuário
-            drawCircle(Color(0xFF0284C7).copy(alpha = 0.3f), radius = 18.dp.toPx(), center = center)
-            drawCircle(Color(0xFF38BDF8), radius = 5.dp.toPx(), center = center)
+    // Dispara carregamento assíncrono dos tiles visíveis ao redor do centro
+    LaunchedEffect(centerLat, centerLon, zoom, showStreetTiles) {
+        if (!showStreetTiles) return@LaunchedEffect
+        val centerTileX = (centerWorldX / tileSize).toInt()
+        val centerTileY = (centerWorldY / tileSize).toInt()
+        val maxTile = n.toInt() - 1
 
-            // Plota os POIs ao redor do radar baseados no azimute real
-            navList.take(5).forEachIndexed { index, poi ->
-                val angleRad = Math.toRadians(poi.bearingDegrees - 90.0)
-                val distNormalized = (poi.distanceMeters / 15000.0).coerceIn(0.2, 0.9)
-                val r = (h * 0.45f * distNormalized).toFloat()
+        for (dx in -2..2) {
+            for (dy in -1..1) {
+                val tx = (centerTileX + dx).coerceIn(0, maxTile)
+                val ty = (centerTileY + dy).coerceIn(0, maxTile)
+                val key = "$zoom/$tx/$ty"
+                if (!tileBitmapCache.containsKey(key)) {
+                    launch(Dispatchers.IO) {
+                        val bmp = loadOrDownloadTile(context, zoom, tx, ty)
+                        if (bmp != null) {
+                            withContext(Dispatchers.Main) {
+                                tileBitmapCache[key] = bmp
+                                onTileCached()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-                val px = center.x + r * kotlin.math.cos(angleRad).toFloat()
-                val py = center.y + r * kotlin.math.sin(angleRad).toFloat()
+    // Vetores Geográficos Reais do Rio de Janeiro (Orla, Lagoa, Vias de Evacuação e Bairros)
+    val lagoaPolygon = remember {
+        listOf(
+            -22.9630 to -43.2170,
+            -22.9660 to -43.2040,
+            -22.9765 to -43.1995,
+            -22.9810 to -43.2085,
+            -22.9775 to -43.2185,
+            -22.9685 to -43.2215
+        )
+    }
 
-                val poiColor = if (poi.poiType.contains("Famili", true)) Color(0xFFF59E0B) else Color(0xFFEF4444)
-                drawCircle(poiColor, radius = 5.dp.toPx(), center = Offset(px, py))
+    val coastlineOrla = remember {
+        listOf(
+            -22.8950 to -43.1800, // Porto / Mauá
+            -22.9050 to -43.1680, // Praça XV / Santos Dumont
+            -22.9200 to -43.1700, // Glória / Flamengo
+            -22.9420 to -43.1780, // Enseada de Botafogo
+            -22.9480 to -43.1630, // Urca / Pão de Açúcar
+            -22.9620 to -43.1650, // Leme
+            -22.9715 to -43.1825, // Copacabana
+            -22.9865 to -43.1900, // Arpoador
+            -22.9865 to -43.2050, // Ipanema
+            -22.9885 to -43.2260, // Leblon
+            -22.9995 to -43.2650  // São Conrado
+        )
+    }
+
+    val arterialRoads = remember {
+        listOf(
+            // Aterro do Flamengo -> Botafogo -> Túnel Novo -> Copacabana
+            listOf(
+                -22.9100 to -43.1720,
+                -22.9300 to -43.1735,
+                -22.9460 to -43.1825,
+                -22.9650 to -43.1800,
+                -22.9830 to -43.1920
+            ),
+            // Corredor Túnel Rebouças (Lagoa <-> Rio Comprido / Tijuca / Centro)
+            listOf(
+                -22.9780 to -43.2150,
+                -22.9610 to -43.2090,
+                -22.9310 to -43.2060,
+                -22.9120 to -43.2100
+            ),
+            // Av. Presidente Vargas -> Maracanã -> Tijuca
+            listOf(
+                -22.9015 to -43.1780,
+                -22.9070 to -43.2050,
+                -22.9130 to -43.2280,
+                -22.9245 to -43.2325
+            ),
+            // Jardim Botânico -> Gávea -> Humaitá -> Laranjeiras
+            listOf(
+                -22.9760 to -43.2290,
+                -22.9665 to -43.2230,
+                -22.9560 to -43.1990,
+                -22.9350 to -43.1880
+            )
+        )
+    }
+
+    val neighborhoods = remember {
+        listOf(
+            Triple("CENTRO", -22.9035, -43.1820),
+            Triple("BOTAFOGO", -22.9510, -43.1860),
+            Triple("COPACABANA", -22.9700, -43.1860),
+            Triple("IPANEMA", -22.9840, -43.2040),
+            Triple("LAGOA", -22.9710, -43.2105),
+            Triple("J. BOTÂNICO", -22.9650, -43.2230),
+            Triple("FLAMENGO", -22.9320, -43.1760),
+            Triple("TIJUCA", -22.9240, -43.2320),
+            Triple("GÁVEA", -22.9790, -43.2330),
+            Triple("LARANJEIRAS", -22.9360, -43.1920)
+        )
+    }
+
+    Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(if (crisisMode) Color.Black else Color(0xFF08101E))
+            .pointerInput(zoom) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    val worldScale = 2.0.pow(zoom.toDouble()) * 256.0
+                    val dLon = -(dragAmount.x / worldScale) * 360.0
+                    val dLat = (dragAmount.y / worldScale) * 360.0 * cos(Math.toRadians(centerLat))
+                    onPanLatLon(dLat, dLon)
+                }
+            }
+    ) {
+        val w = size.width
+        val h = size.height
+
+        fun toScreen(lat: Double, lon: Double): Offset {
+            val (wx, wy) = latLonToWorldPx(lat, lon)
+            val sx = (wx - centerWorldX + w / 2.0).toFloat()
+            val sy = (wy - centerWorldY + h / 2.0).toFloat()
+            return Offset(sx, sy)
+        }
+
+        // 1. Camada de Tiles OpenStreetMap (se habilitada e disponível no cache)
+        if (showStreetTiles) {
+            val centerTileX = (centerWorldX / tileSize).toInt()
+            val centerTileY = (centerWorldY / tileSize).toInt()
+            val maxTile = n.toInt() - 1
+
+            for (dx in -2..2) {
+                for (dy in -2..2) {
+                    val tx = centerTileX + dx
+                    val ty = centerTileY + dy
+                    if (tx in 0..maxTile && ty in 0..maxTile) {
+                        val key = "$zoom/$tx/$ty"
+                        val bmp = tileBitmapCache[key]
+                        if (bmp != null) {
+                            val tileScreenX = (tx * tileSize - centerWorldX + w / 2.0).roundToInt()
+                            val tileScreenY = (ty * tileSize - centerWorldY + h / 2.0).roundToInt()
+                            drawImage(
+                                image = bmp,
+                                dstOffset = IntOffset(tileScreenX, tileScreenY),
+                                dstSize = IntSize(tileSize.roundToInt() + 1, tileSize.roundToInt() + 1),
+                                alpha = if (crisisMode) 0.45f else 0.78f
+                            )
+                        }
+                    }
+                }
             }
         }
 
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(8.dp)
-        ) {
-            Text(
-                text = "GPS: %.4f, %.4f".format(currentLat, currentLon),
-                fontSize = 10.sp,
-                color = Color(0xFF94A3B8),
-                fontWeight = FontWeight.Bold
+        // 2. Grade Cartográfica Tática de Coordenadas
+        val gridStep = 64.dp.toPx()
+        var gx = (w / 2f) % gridStep
+        while (gx < w) {
+            drawLine(
+                color = Color(0xFF1E293B).copy(alpha = 0.45f),
+                start = Offset(gx, 0f),
+                end = Offset(gx, h),
+                strokeWidth = 1f
+            )
+            gx += gridStep
+        }
+        var gy = (h / 2f) % gridStep
+        while (gy < h) {
+            drawLine(
+                color = Color(0xFF1E293B).copy(alpha = 0.45f),
+                start = Offset(0f, gy),
+                end = Offset(w, gy),
+                strokeWidth = 1f
+            )
+            gy += gridStep
+        }
+
+        // 3. Cartografia Vetorial Offline do Rio de Janeiro (Lagoa Rodrigo de Freitas)
+        val lagoaPath = Path().apply {
+            lagoaPolygon.forEachIndexed { idx, (lat, lon) ->
+                val pt = toScreen(lat, lon)
+                if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
+            }
+            close()
+        }
+        drawPath(
+            path = lagoaPath,
+            color = Color(0xFF0284C7).copy(alpha = 0.30f)
+        )
+        drawPath(
+            path = lagoaPath,
+            color = Color(0xFF38BDF8).copy(alpha = 0.65f),
+            style = Stroke(width = 1.5.dp.toPx())
+        )
+
+        // Linha Costeira / Orla do Rio de Janeiro
+        val coastPath = Path().apply {
+            coastlineOrla.forEachIndexed { idx, (lat, lon) ->
+                val pt = toScreen(lat, lon)
+                if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
+            }
+        }
+        drawPath(
+            path = coastPath,
+            color = Color(0xFF0EA5E9).copy(alpha = 0.65f),
+            style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        )
+
+        // Corredores Viários / Rotas de Evacuação Principais
+        arterialRoads.forEach { road ->
+            val roadPath = Path().apply {
+                road.forEachIndexed { idx, (lat, lon) ->
+                    val pt = toScreen(lat, lon)
+                    if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
+                }
+            }
+            drawPath(
+                path = roadPath,
+                color = Color(0xFF64748B).copy(alpha = 0.6f),
+                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+            )
+        }
+
+        // Rótulos de Bairros do Rio de Janeiro
+        val labelPaint = Paint().apply {
+            color = android.graphics.Color.argb(170, 148, 163, 184)
+            textSize = 9.sp.toPx()
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+        }
+        neighborhoods.forEach { (name, lat, lon) ->
+            val pt = toScreen(lat, lon)
+            if (pt.x in 0f..w && pt.y in 0f..h) {
+                drawContext.canvas.nativeCanvas.drawText(name, pt.x, pt.y, labelPaint)
+            }
+        }
+
+        // 4. Vetor Direto de Rota Haversine entre Usuário e o POI Selecionado
+        val userScreen = toScreen(userLat, userLon)
+        if (focusedPoi != null) {
+            val targetScreen = toScreen(focusedPoi.latitude, focusedPoi.longitude)
+            drawLine(
+                color = Color(0xFFF59E0B),
+                start = userScreen,
+                end = targetScreen,
+                strokeWidth = 2.5.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
+            )
+        }
+
+        // 5. Marcadores Geográficos de todos os POIs do Banco Room
+        val poiLabelPaint = Paint().apply {
+            color = android.graphics.Color.WHITE
+            textSize = 10.sp.toPx()
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            isAntiAlias = true
+            setShadowLayer(4f, 0f, 1f, android.graphics.Color.BLACK)
+        }
+
+        pois.forEach { poi ->
+            val pt = toScreen(poi.latitude, poi.longitude)
+            if (pt.x in -40f..(w + 40f) && pt.y in -40f..(h + 40f)) {
+                val isFocused = poi.id == focusedPoi?.id
+                val pinColor = when {
+                    poi.type.name.contains("FAMILY") -> Color(0xFFF59E0B)
+                    poi.type.name.contains("HOSPITAL") -> Color(0xFFEF4444)
+                    else -> Color(0xFF10B981)
+                }
+
+                if (isFocused) {
+                    drawCircle(
+                        color = pinColor.copy(alpha = 0.35f),
+                        radius = 16.dp.toPx(),
+                        center = pt
+                    )
+                }
+                drawCircle(
+                    color = Color.Black,
+                    radius = if (isFocused) 8.dp.toPx() else 6.dp.toPx(),
+                    center = pt
+                )
+                drawCircle(
+                    color = pinColor,
+                    radius = if (isFocused) 6.5.dp.toPx() else 4.5.dp.toPx(),
+                    center = pt
+                )
+
+                val shortLabel = poi.title.substringBefore(" -").take(18)
+                drawContext.canvas.nativeCanvas.drawText(
+                    shortLabel,
+                    pt.x + 10.dp.toPx(),
+                    pt.y + 4.dp.toPx(),
+                    poiLabelPaint
+                )
+            }
+        }
+
+        // 6. Pino da Posição Atual do Usuário (GPS Pulso)
+        if (userScreen.x in -50f..(w + 50f) && userScreen.y in -50f..(h + 50f)) {
+            drawCircle(
+                color = Color(0xFF0284C7).copy(alpha = 0.30f),
+                radius = 20.dp.toPx(),
+                center = userScreen
+            )
+            drawCircle(
+                color = Color.White,
+                radius = 7.dp.toPx(),
+                center = userScreen
+            )
+            drawCircle(
+                color = Color(0xFF38BDF8),
+                radius = 5.dp.toPx(),
+                center = userScreen
             )
         }
     }
+}
+
+/**
+ * Carrega um tile 256x256 do cache offline no disco (filesDir/osm_tiles) ou faz o download
+ * e grava em disco para uso 100% offline nas próximas consultas.
+ */
+private fun loadOrDownloadTile(
+    context: Context,
+    zoom: Int,
+    x: Int,
+    y: Int
+): ImageBitmap? {
+    return try {
+        val tileFile = File(context.filesDir, "osm_tiles/$zoom/$x/$y.png")
+        if (tileFile.exists() && tileFile.length() > 100) {
+            val bmp = BitmapFactory.decodeFile(tileFile.absolutePath)
+            if (bmp != null) return bmp.asImageBitmap()
+        }
+
+        tileFile.parentFile?.mkdirs()
+        val url = URL("https://tile.openstreetmap.org/$zoom/$x/$y.png")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 4000
+            readTimeout = 4000
+            setRequestProperty("User-Agent", "ResilienceHub-CivilPreparedness/1.0")
+        }
+
+        if (conn.responseCode == 200) {
+            val bytes = conn.inputStream.use { it.readBytes() }
+            if (bytes.isNotEmpty()) {
+                FileOutputStream(tileFile).use { it.write(bytes) }
+                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                return bmp?.asImageBitmap()
+            }
+        }
+        null
+    } catch (_: Exception) {
+        // Sem internet no momento: opera silenciosamente com a camada vetorial offline e tiles já salvos
+        null
+    }
+}
+
+private suspend fun preloadRegionTiles(
+    context: Context,
+    centerLat: Double,
+    centerLon: Double,
+    zoom: Int,
+    cache: MutableMap<String, ImageBitmap>
+): Int = withContext(Dispatchers.IO) {
+    var count = 0
+    val zoomsToCache = listOf(zoom, (zoom + 1).coerceAtMost(16))
+    for (z in zoomsToCache) {
+        val n = 2.0.pow(z.toDouble())
+        val latRad = Math.toRadians(centerLat.coerceIn(-85.0, 85.0))
+        val cx = ((centerLon + 180.0) / 360.0 * n).toInt()
+        val cy = ((1.0 - ln(tan(latRad) + 1.0 / cos(latRad)) / PI) / 2.0 * n).toInt()
+        val maxTile = n.toInt() - 1
+
+        for (dx in -2..2) {
+            for (dy in -2..2) {
+                val tx = (cx + dx).coerceIn(0, maxTile)
+                val ty = (cy + dy).coerceIn(0, maxTile)
+                val key = "$z/$tx/$ty"
+                val bmp = loadOrDownloadTile(context, z, tx, ty)
+                if (bmp != null) {
+                    withContext(Dispatchers.Main) {
+                        cache[key] = bmp
+                    }
+                    count++
+                }
+            }
+        }
+    }
+    count
+}
+
+private fun countCachedTilesOnDisk(context: Context): Int {
+    val root = File(context.filesDir, "osm_tiles")
+    if (!root.exists()) return 0
+    return root.walkTopDown().count { it.isFile && it.extension == "png" }
 }
 
 @Composable
@@ -584,7 +977,6 @@ fun PoiOfflineCard(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(12.dp)
         ) {
-            // Seta de Azimute
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier

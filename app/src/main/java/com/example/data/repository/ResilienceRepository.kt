@@ -69,11 +69,15 @@ class ResilienceRepository(private val database: AppDatabase) {
     val allManualChunks: Flow<List<ManualChunkFtsEntity>> = database.manualChunkDao().getAllChunks()
 
     fun searchManual(query: String): Flow<List<ManualChunkFtsEntity>> {
-        val sanitized = query.trim().replace("\"", "").replace("'", "")
-        return if (sanitized.isBlank()) {
+        val cleanTokens = query.replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+            .trim()
+            .split(Regex("\\s+"))
+            .filter { it.length >= 2 }
+        return if (cleanTokens.isEmpty()) {
             database.manualChunkDao().getAllChunks()
         } else {
-            database.manualChunkDao().searchChunks("$sanitized*")
+            val ftsQuery = cleanTokens.joinToString(" OR ") { "$it*" }
+            database.manualChunkDao().searchChunks(ftsQuery)
         }
     }
 

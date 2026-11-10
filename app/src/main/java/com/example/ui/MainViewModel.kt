@@ -270,6 +270,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun importModelFromUri(uri: Uri) {
+        viewModelScope.launch {
+            _pdfImportStatus.value = "Copiando modelo LLM local (.task/.bin) para o armazenamento interno do app (aguarde)..."
+            val result = pdfRagManager.importModelFromUri(uri)
+            result.fold(
+                onSuccess = { name ->
+                    _pdfImportStatus.value = "✓ Modelo IA Local \"$name\" configurado e pronto para inferência offline!"
+                    _ragModeAi.value = true
+                },
+                onFailure = { err ->
+                    _pdfImportStatus.value = "❌ Falha ao importar modelo IA: ${err.localizedMessage}"
+                }
+            )
+        }
+    }
+
     fun askRagQuestion(question: String) {
         viewModelScope.launch {
             if (question.isBlank()) return@launch

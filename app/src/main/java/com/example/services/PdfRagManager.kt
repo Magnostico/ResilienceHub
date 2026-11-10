@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.Normalizer
 
 /**
  * Gerenciador de ingestão de cartilhas e busca híbrida RAG 100% Offline:
@@ -181,37 +182,75 @@ class PdfRagManager(
     // 2. BUSCA HÍBRIDA: MODO RÁPIDO (FTS) vs MODO IA LOCAL (RAG)
     // =========================================================================
 
+    private val stopWords = setOf(
+        "como", "para", "qual", "quais", "que", "com", "sem", "nos", "nas",
+        "dos", "das", "por", "uma", "uns", "umas", "isso", "este", "esta",
+        "onde", "quando", "porque", "deve", "devo", "fazer", "usar", "tem", "sao"
+    )
+
+    private fun normalizeAccents(input: String): String {
+        val temp = Normalizer.normalize(input.lowercase(), Normalizer.Form.NFD)
+        return Regex("\\p{InCombiningDiacriticalMarks}+").replace(temp, "")
+    }
+
+    private fun extractKeywords(query: String): List<String> {
+        val cleaned = query.replace(Regex("[^\\p{L}\\p{N}\\s]"), " ").trim()
+        val tokens = cleaned.split(Regex("\\s+")).filter { it.length >= 2 }
+        val filtered = tokens.filter { normalizeAccents(it) !in stopWords && it.length >= 3 }
+        return if (filtered.isNotEmpty()) filtered else tokens
+    }
+
     /**
      * Modo A: Rápido (Zero Consumo de Bateria)
      * Consulta diretamente os índices FTS4 em memória/disco sem acionar CPU de IA.
      */
     fun searchFastFts(query: String): Flow<List<ManualChunkFtsEntity>> {
-        val sanitized = query.trim().replace("\"", "").replace("'", "")
-        return if (sanitized.isBlank()) {
+        val keywords = extractKeywords(query)
+        return if (keywords.isEmpty()) {
             database.manualChunkDao().getAllChunks()
         } else {
-            database.manualChunkDao().searchChunks("$sanitized*")
+            val ftsQuery = keywords.joinToString(" OR ") { "$it*" }
+            database.manualChunkDao().searchChunks(ftsQuery)
         }
     }
 
     /**
      * Modo B: IA Local (RAG)
-     * Recupera os 3 trechos mais relevantes do FTS, constrói o prompt estrito de emergência
-     * e executa a inferência conforme a especificação do MediaPipe LLM Inference.
+     * Recupera os 3 trechos mais relevantes por pontuação semântica/lexical e FTS,
+     * constrói o prompt estrito de emergência e executa a inferência local.
      */
     suspend fun searchLocalAiRag(
         query: String,
         customModelPath: String? = null
     ): RagResponse = withContext(Dispatchers.IO) {
-        val sanitized = query.trim().replace("\"", "").replace("'", "")
-        val allMatching = if (sanitized.isNotBlank()) {
-            database.manualChunkDao().searchChunks("$sanitized*").first()
+        val keywords = extractKeywords(query)
+        val normalizedKeywords = keywords.map { normalizeAccents(it) }
+
+        val allChunks = database.manualChunkDao().getAllChunks().first()
+
+        // Pontuação híbrida (BM25 simplificado + correspondência exata sem acentos)
+        val scoredChunks = if (normalizedKeywords.isEmpty()) {
+            allChunks.take(3)
         } else {
-            database.manualChunkDao().getAllChunks().first()
+            allChunks.map { chunk ->
+                val normContent = normalizeAccents(chunk.contentText)
+                val normTitle = normalizeAccents(chunk.docTitle)
+                val normCat = normalizeAccents(chunk.category)
+                var score = 0
+                for (kw in normalizedKeywords) {
+                    if (normContent.contains(kw)) score += 10
+                    if (normTitle.contains(kw)) score += 5
+                    if (normCat.contains(kw)) score += 4
+                }
+                Pair(chunk, score)
+            }
+                .filter { it.second > 0 }
+                .sortedByDescending { it.second }
+                .map { it.first }
         }
 
         // Seleciona até 3 trechos mais relevantes
-        val topChunks = allMatching.take(3)
+        val topChunks = scoredChunks.take(3)
 
         // Montagem do Prompt Estrito exigido
         val contextBuilder = StringBuilder()
@@ -246,21 +285,74 @@ class PdfRagManager(
         )
     }
 
+    private var cachedLlmInference: LlmInference? = null
+    private var cachedModelPath: String? = null
+
     /**
-     * Localiza o arquivo de modelo local Gemma (.bin ou .task) nos locais padrão do aparelho.
+     * Importa o arquivo de modelo LLM (.task ou .bin, ex: gemma-4-E2B-it.task) selecionado pelo usuário
+     * via Storage Access Framework para o diretório interno do app para execução com MediaPipe.
+     */
+    suspend fun importModelFromUri(modelUri: Uri): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val rawName = getFileNameFromUri(modelUri) ?: "gemma-4-E2B-it.task"
+            val safeName = if (rawName.endsWith(".task") || rawName.endsWith(".bin")) rawName else "$rawName.task"
+            val destFile = File(context.filesDir, safeName)
+
+            val inputStream = context.contentResolver.openInputStream(modelUri)
+                ?: return@withContext Result.failure(Exception("Não foi possível ler o arquivo do modelo"))
+
+            inputStream.use { input ->
+                destFile.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var bytesRead: Int
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        output.write(buffer, 0, bytesRead)
+                    }
+                    output.flush()
+                }
+            }
+
+            // Reseta instância em cache para carregar o novo modelo
+            cachedLlmInference = null
+            cachedModelPath = destFile.absolutePath
+            Result.success(destFile.name)
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao importar modelo LLM local", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Localiza o arquivo de modelo local Gemma (.task ou .bin) nos locais padrão do aparelho.
      */
     fun findLocalModelFile(customPath: String? = null): File? {
         if (!customPath.isNullOrBlank()) {
             val f = File(customPath)
-            if (f.exists()) return f
+            if (f.exists() && f.length() > 1024) return f
         }
+        if (!cachedModelPath.isNullOrBlank()) {
+            val f = File(cachedModelPath!!)
+            if (f.exists() && f.length() > 1024) return f
+        }
+
+        // Procura qualquer arquivo .task ou .bin já importado em filesDir ou externalFilesDir
+        val dynamicSearchDirs = listOfNotNull(context.filesDir, context.getExternalFilesDir(null))
+        for (dir in dynamicSearchDirs) {
+            val found = dir.listFiles()?.firstOrNull {
+                it.isFile && (it.name.endsWith(".task", true) || it.name.endsWith(".bin", true)) && it.length() > 1024 * 1024
+            }
+            if (found != null) return found
+        }
+
         val candidateLocations = listOf(
+            File(context.filesDir, "gemma-4-E2B-it.task"),
+            File(context.filesDir, "gemma2-2b-it-gpu-int8.task"),
             File(context.filesDir, "gemma-2b-it-cpu-int4.bin"),
             File(context.filesDir, "gemma-2b.bin"),
             File(context.filesDir, "model.bin"),
-            File(context.filesDir, "gemma2-2b-it-gpu-int8.task"),
-            File(context.getExternalFilesDir(null), "gemma-2b-it-cpu-int4.bin"),
-            File(context.getExternalFilesDir(null), "model.bin"),
+            File(context.getExternalFilesDir(null), "gemma-4-E2B-it.task"),
+            File("/sdcard/Download/gemma-4-E2B-it.task"),
+            File("/data/local/tmp/gemma-4-E2B-it.task"),
             File("/data/local/tmp/gemma-2b-it-cpu-int4.bin")
         )
         return candidateLocations.firstOrNull { it.exists() }
@@ -283,18 +375,25 @@ class PdfRagManager(
 
         if (modelFile != null && modelFile.exists()) {
             return try {
-                val options = LlmInference.LlmInferenceOptions.builder()
-                    .setModelPath(modelFile.absolutePath)
-                    .setMaxTokens(512)
-                    .setTemperature(0.1f)
-                    .setTopK(1)
-                    .build()
+                val llm = if (cachedLlmInference != null && cachedModelPath == modelFile.absolutePath) {
+                    cachedLlmInference!!
+                } else {
+                    val options = LlmInference.LlmInferenceOptions.builder()
+                        .setModelPath(modelFile.absolutePath)
+                        .setMaxTokens(512)
+                        .setTemperature(0.1f)
+                        .setTopK(1)
+                        .build()
+                    LlmInference.createFromOptions(context, options).also {
+                        cachedLlmInference = it
+                        cachedModelPath = modelFile.absolutePath
+                    }
+                }
 
-                val llmInference = LlmInference.createFromOptions(context, options)
-                val response = llmInference.generateResponse(prompt)
+                val response = llm.generateResponse(prompt)
                 Pair(response, "MEDIAPIPE_GEMMA_LOCAL_LLM (${modelFile.name})")
-            } catch (e: Exception) {
-                Log.w(TAG, "Falha na inferência MediaPipe LlmInference, alternando para síntese estrita FTS", e)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Falha na inferência MediaPipe LlmInference, alternando para síntese estrita FTS", t)
                 fallbackStructuredSynthesis(query, sources, modelNotFound = false)
             }
         } else {
@@ -312,7 +411,7 @@ class PdfRagManager(
         modelNotFound: Boolean = true
     ): Pair<String, String> {
         val mode = if (modelNotFound) {
-            "OFFLINE_FTS_RAG (Coloque gemma-2b.bin em filesDir para ativar LLM)"
+            "OFFLINE_FTS_RAG (Importe gemma-4-E2B-it.task no topo para LLM)"
         } else {
             "OFFLINE_FTS_EXTRACTIVE_RAG"
         }
@@ -328,19 +427,20 @@ class PdfRagManager(
         val responseBuilder = StringBuilder()
         responseBuilder.append("Diretrizes de Emergência Oficiais Extraídas do Banco Local:\n\n")
 
-        val queryTerms = query.lowercase().split(" ").filter { it.length > 2 }
+        val queryTerms = extractKeywords(query).map { normalizeAccents(it) }
 
         sources.forEachIndexed { i, chunk ->
             responseBuilder.append("• Trecho ${i + 1} [${chunk.docTitle} — Pág. ${chunk.pageNumber}]:\n")
             
             val sentences = chunk.contentText.split(Regex("[.!?]\\s+"))
             val matchingSentences = sentences.filter { sentence ->
-                queryTerms.any { term -> sentence.lowercase().contains(term) }
+                val normSentence = normalizeAccents(sentence)
+                queryTerms.any { term -> normSentence.contains(term) }
             }
 
             val sentencesToShow = if (matchingSentences.isNotEmpty()) matchingSentences else sentences.take(2)
             sentencesToShow.forEach { s ->
-                val trimmed = s.trim()
+                val trimmed = s.trim().trimEnd('.')
                 if (trimmed.isNotBlank()) {
                     responseBuilder.append("   - \"$trimmed.\"\n")
                 }

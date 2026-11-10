@@ -41,13 +41,19 @@ fun ManualsAiScreen(
         uri?.let { viewModel.importPdfFromUri(it) }
     }
 
+    val modelPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { viewModel.importModelFromUri(it) }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp)
             .testTag("manuals_ai_screen")
     ) {
-        // --- 1. AÇÕES DO TOPO: IMPORTAÇÃO DE PDF & SWITCH MODO IA LOCAL ---
+        // --- 1. AÇÕES DO TOPO: IMPORTAÇÃO DE PDF, MODELO IA & SWITCH MODO IA LOCAL ---
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -55,14 +61,26 @@ fun ManualsAiScreen(
                 .fillMaxWidth()
                 .padding(vertical = 6.dp)
         ) {
-            FilledTonalButton(
-                onClick = { pdfPickerLauncher.launch("application/pdf") },
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                modifier = Modifier.testTag("btn_import_pdf")
-            ) {
-                Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Importar PDF Oficial", fontSize = 11.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilledTonalButton(
+                    onClick = { pdfPickerLauncher.launch("application/pdf") },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("btn_import_pdf")
+                ) {
+                    Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Importar PDF", fontSize = 11.sp)
+                }
+
+                OutlinedButton(
+                    onClick = { modelPickerLauncher.launch("*/*") },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("btn_import_model")
+                ) {
+                    Icon(Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Modelo .task", fontSize = 11.sp)
+                }
             }
 
             // Chave para ativar IA Local (MediaPipe LLM / RAG)

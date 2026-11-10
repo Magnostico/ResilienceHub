@@ -106,7 +106,6 @@ dependencies {
   implementation(libs.androidx.camera.view)
   implementation(libs.androidx.camera.core)
   implementation(libs.mlkit.barcode.scanning)
-  implementation(libs.maplibre.android.sdk)
   implementation(libs.mediapipe.tasks.genai)
   implementation(libs.pdfbox.android)
   implementation(libs.play.services.location)

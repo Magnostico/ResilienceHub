@@ -3,14 +3,12 @@ package com.example
 import android.Manifest
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import org.maplibre.android.MapLibre
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -39,12 +37,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        try {
-            MapLibre.getInstance(applicationContext)
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Falha ao inicializar MapLibre", e)
-        }
 
         setContent {
             val state by viewModel.uiState.collectAsStateWithLifecycle()
