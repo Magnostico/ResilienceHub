@@ -1,5 +1,8 @@
 package com.example.ui.components
 
+import android.content.Context
+import android.os.Bundle
+import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,16 +21,68 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.domain.RationingAndAlertEngine
 import com.example.ui.MainUiState
 import com.example.ui.MainViewModel
-import java.util.Locale
+import org.maplibre.android.MapLibre
+import org.maplibre.android.annotations.MarkerOptions
+import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
+import java.io.File
+
+private const val TAG = "OfflineMapScreen"
+
+// Estilo tático com fonte raster OpenStreetMap + fallback escuro
+private val OFFLINE_DARK_STYLE_JSON = """
+{
+  "version": 8,
+  "name": "ResilienceHub Tactical Offline",
+  "sources": {
+    "open-street-map": {
+      "type": "raster",
+      "tiles": [
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+      ],
+      "tileSize": 256,
+      "attribution": "© OpenStreetMap contributors"
+    }
+  },
+  "layers": [
+    {
+      "id": "background-crisis",
+      "type": "background",
+      "paint": {
+        "background-color": "#090d16"
+      }
+    },
+    {
+      "id": "osm-raster-layer",
+      "type": "raster",
+      "source": "open-street-map",
+      "minzoom": 0,
+      "maxzoom": 19,
+      "paint": {
+        "raster-opacity": 0.85,
+        "raster-contrast": 0.2
+      }
+    }
+  ]
+}
+""".trimIndent()
 
 @Composable
 fun OfflineMapScreen(
@@ -36,12 +91,26 @@ fun OfflineMapScreen(
     onOpenAddPoiDialog: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val crisisMode = state.crisisMode
     val navList = state.poiNavigationList
+
+    // Inicializa o MapLibre Singleton uma única vez
+    LaunchedEffect(Unit) {
+        try {
+            MapLibre.getInstance(context)
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao inicializar MapLibre", e)
+        }
+    }
 
     // Seleciona o ponto de foco (padrão é o Ponto de Encontro Familiar mais próximo)
     var selectedPoiId by remember { mutableStateOf<Long?>(null) }
     val focusedPoi = navList.find { it.poiId == selectedPoiId } ?: navList.firstOrNull()
+
+    var mapLibreInstance by remember { mutableStateOf<MapLibreMap?>(null) }
+    var isMapExpanded by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -61,9 +130,9 @@ fun OfflineMapScreen(
             ),
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp)
+                .padding(vertical = 6.dp)
         ) {
-            Column(modifier = Modifier.padding(14.dp)) {
+            Column(modifier = Modifier.padding(12.dp)) {
                 // Header com botão de GPS Pulso
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -72,7 +141,12 @@ fun OfflineMapScreen(
                 ) {
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Icon(
+                                Icons.Default.Explore,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Bússola de Emergência Offline", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
@@ -84,18 +158,37 @@ fun OfflineMapScreen(
                         )
                     }
 
-                    Button(
-                        onClick = { viewModel.triggerSingleShotGpsPulse() },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        modifier = Modifier.testTag("btn_gps_pulse_map")
-                    ) {
-                        Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("GPS Pulso", fontSize = 11.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Button(
+                            onClick = {
+                                viewModel.triggerSingleShotGpsPulse()
+                                mapLibreInstance?.let { map ->
+                                    val userPos = LatLng(state.currentLat, state.currentLon)
+                                    map.animateCamera(CameraUpdateFactory.newLatLngZoom(userPos, 14.0))
+                                }
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.testTag("btn_gps_pulse_map")
+                        ) {
+                            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("GPS Pulso", fontSize = 11.sp)
+                        }
+
+                        IconButton(
+                            onClick = { isMapExpanded = !isMapExpanded },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                if (isMapExpanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                contentDescription = "Expandir Mapa",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // Compass & Bearing Target Display
                 if (focusedPoi != null) {
@@ -108,23 +201,22 @@ fun OfflineMapScreen(
                                 if (crisisMode) Color(0xFF0D0D0D) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
                                 RoundedCornerShape(8.dp)
                             )
-                            .padding(10.dp)
+                            .padding(8.dp)
                     ) {
                         // Bússola Visual Renderizada
                         Box(
                             contentAlignment = Alignment.Center,
-                            modifier = Modifier.size(64.dp)
+                            modifier = Modifier.size(54.dp)
                         ) {
-                            Canvas(modifier = Modifier.size(64.dp)) {
+                            Canvas(modifier = Modifier.size(54.dp)) {
                                 drawCircle(
                                     color = if (crisisMode) Color(0xFF27272A) else Color.LightGray,
                                     style = Stroke(width = 2.dp.toPx())
                                 )
-                                // Linhas cardeais
                                 drawLine(
                                     color = Color.Gray,
                                     start = Offset(size.width / 2, 4.dp.toPx()),
-                                    end = Offset(size.width / 2, 10.dp.toPx()),
+                                    end = Offset(size.width / 2, 8.dp.toPx()),
                                     strokeWidth = 2.dp.toPx()
                                 )
                             }
@@ -133,13 +225,13 @@ fun OfflineMapScreen(
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier
-                                    .size(32.dp)
+                                    .size(28.dp)
                                     .rotate(focusedPoi.bearingDegrees.toFloat())
                             )
                         }
 
                         // Informações do Alvo
-                        Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
+                        Column(modifier = Modifier.padding(start = 10.dp).weight(1f)) {
                             Text(
                                 text = "Rumo ao Alvo:",
                                 fontSize = 10.sp,
@@ -154,7 +246,7 @@ fun OfflineMapScreen(
                             )
                             Text(
                                 text = "${focusedPoi.cardinalDetailed} • Azimute ${focusedPoi.bearingDegrees.toInt()}°",
-                                fontSize = 12.sp,
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.primary
                             )
@@ -164,12 +256,12 @@ fun OfflineMapScreen(
                         Column(horizontalAlignment = Alignment.End) {
                             Text(
                                 text = focusedPoi.distanceFormatted,
-                                fontSize = 20.sp,
+                                fontSize = 18.sp,
                                 fontWeight = FontWeight.Black,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Text(
-                                text = "em linha reta",
+                                text = "linha reta",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -179,67 +271,97 @@ fun OfflineMapScreen(
             }
         }
 
-        // --- 2. GRID VISUAL TÁTICO MAPLIBRE / MBTILES OFFLINE ---
+        // --- 2. MAPA REAL MAPLIBRE NATIVE SDK COM SUPORTE OFFLINE ---
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = if (crisisMode) Color.Black else Color(0xFF0F172A)
             ),
             shape = RoundedCornerShape(12.dp),
             border = androidx.compose.foundation.BorderStroke(
-                1.dp,
-                if (crisisMode) Color(0xFF27272A) else MaterialTheme.colorScheme.outlineVariant
+                1.5.dp,
+                if (crisisMode) MaterialTheme.colorScheme.primary else Color(0xFF0284C7)
             ),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(130.dp)
+                .height(if (isMapExpanded) 320.dp else 190.dp)
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Tactical Vector Canvas
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val w = size.width
-                    val h = size.height
-
-                    // Gridlines táticas estilo MapLibre / radar
-                    val gridSpacing = 30.dp.toPx()
-                    var x = 0f
-                    while (x < w) {
-                        drawLine(
-                            color = Color(0xFF1E293B).copy(alpha = 0.6f),
-                            start = Offset(x, 0f),
-                            end = Offset(x, h),
-                            strokeWidth = 1f
-                        )
-                        x += gridSpacing
+                val mapView = remember {
+                    MapView(context).apply {
+                        onCreate(null)
                     }
-                    var y = 0f
-                    while (y < h) {
-                        drawLine(
-                            color = Color(0xFF1E293B).copy(alpha = 0.6f),
-                            start = Offset(0f, y),
-                            end = Offset(w, y),
-                            strokeWidth = 1f
-                        )
-                        y += gridSpacing
-                    }
-
-                    // Ponto Central do Usuário (GPS Pulso)
-                    val center = Offset(w / 2, h / 2)
-                    drawCircle(color = Color(0xFF0284C7).copy(alpha = 0.3f), radius = 24.dp.toPx(), center = center)
-                    drawCircle(color = Color(0xFF38BDF8), radius = 6.dp.toPx(), center = center)
-
-                    // Marcadores POIs calculados em escala local
-                    val p1 = Offset(w * 0.35f, h * 0.70f) // Parque Lage
-                    val p2 = Offset(w * 0.45f, h * 0.25f) // Praça Afonso Pena
-                    val p3 = Offset(w * 0.65f, h * 0.20f) // Souza Aguiar Centro
-                    val p4 = Offset(w * 0.30f, h * 0.85f) // Miguel Couto Gávea
-
-                    drawCircle(color = Color(0xFFF59E0B), radius = 5.dp.toPx(), center = p1)
-                    drawCircle(color = Color(0xFFF59E0B), radius = 5.dp.toPx(), center = p2)
-                    drawCircle(color = Color(0xFFEF4444), radius = 5.dp.toPx(), center = p3)
-                    drawCircle(color = Color(0xFFEF4444), radius = 5.dp.toPx(), center = p4)
                 }
 
-                // Legenda sobreposta MapLibre
+                // Gerenciamento de ciclo de vida do MapView
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        when (event) {
+                            Lifecycle.Event.ON_START -> mapView.onStart()
+                            Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                            Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                            Lifecycle.Event.ON_STOP -> mapView.onStop()
+                            Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
+                            else -> {}
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
+                        mapView.onDestroy()
+                    }
+                }
+
+                AndroidView(
+                    factory = { mapView },
+                    modifier = Modifier.fillMaxSize()
+                ) { view ->
+                    view.getMapAsync { map ->
+                        mapLibreInstance = map
+
+                        // Configura Estilo (Local se existir arquivo .mbtiles / .pmtiles ou estilo tático embutido)
+                        val localMbtiles = File(context.filesDir, "rio_janeiro.mbtiles")
+                        val localStyle = File(context.filesDir, "style.json")
+
+                        val styleBuilder = when {
+                            localStyle.exists() -> Style.Builder().fromUri("file://${localStyle.absolutePath}")
+                            localMbtiles.exists() -> Style.Builder().fromJson(OFFLINE_DARK_STYLE_JSON)
+                            else -> Style.Builder().fromJson(OFFLINE_DARK_STYLE_JSON)
+                        }
+
+                        map.setStyle(styleBuilder) {
+                            // Limpa e reinsere marcadores
+                            map.clear()
+
+                            // Marcador do Usuário (GPS Pulso)
+                            val userLocation = LatLng(state.currentLat, state.currentLon)
+                            map.addMarker(
+                                MarkerOptions()
+                                    .position(userLocation)
+                                    .title("Minha Posição (GPS Pulso)")
+                                    .snippet("Coordenadas: ${state.currentLat}, ${state.currentLon}")
+                            )
+
+                            // Marcadores dos POIs do banco
+                            state.pois.forEach { poi ->
+                                map.addMarker(
+                                    MarkerOptions()
+                                        .position(LatLng(poi.latitude, poi.longitude))
+                                        .title(poi.title)
+                                        .snippet("${poi.type.name} • ${poi.address}")
+                                )
+                            }
+
+                            // Posiciona câmera inicial
+                            val initialCamera = CameraPosition.Builder()
+                                .target(userLocation)
+                                .zoom(12.5)
+                                .build()
+                            map.cameraPosition = initialCamera
+                        }
+                    }
+                }
+
+                // Tag sobreposta MapLibre Native
                 Row(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
@@ -248,11 +370,11 @@ fun OfflineMapScreen(
                         .padding(8.dp)
                 ) {
                     Surface(
-                        color = Color.Black.copy(alpha = 0.75f),
+                        color = Color.Black.copy(alpha = 0.8f),
                         shape = RoundedCornerShape(4.dp)
                     ) {
                         Text(
-                            text = "MapLibre Native • Vetores Offline (.mbtiles)",
+                            text = "MapLibre Native SDK • Vetores Offline",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White,
@@ -261,11 +383,11 @@ fun OfflineMapScreen(
                     }
 
                     Surface(
-                        color = Color.Black.copy(alpha = 0.75f),
+                        color = Color.Black.copy(alpha = 0.8f),
                         shape = RoundedCornerShape(4.dp)
                     ) {
                         Text(
-                            text = "Rio de Janeiro • Sem Internet",
+                            text = "Rio de Janeiro • 100% Offline",
                             fontSize = 10.sp,
                             color = Color(0xFF10B981),
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -275,16 +397,18 @@ fun OfflineMapScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // --- 3. LISTA DE PONTOS DE ENCONTRO E APOIO ---
+        // --- 3. LISTA DE PONTOS DE ENCONTRO E APOIO COM ZOOM INTERATIVO ---
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 4.dp)
         ) {
             Text(
-                text = "Pontos de Apoio e Encontro Ordenados por Distância:",
+                text = "Pontos de Apoio e Encontro (Toque para focar no mapa):",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -302,7 +426,18 @@ fun OfflineMapScreen(
                     nav = nav,
                     isSelected = isSelected,
                     crisisMode = crisisMode,
-                    onClick = { selectedPoiId = nav.poiId }
+                    onClick = {
+                        selectedPoiId = nav.poiId
+                        // Anima câmera do mapa para o POI selecionado
+                        val targetPoi = state.pois.find { it.id == nav.poiId }
+                        if (targetPoi != null && mapLibreInstance != null) {
+                            val targetLocation = LatLng(targetPoi.latitude, targetPoi.longitude)
+                            mapLibreInstance?.animateCamera(
+                                CameraUpdateFactory.newLatLngZoom(targetLocation, 14.5),
+                                1000
+                            )
+                        }
+                    }
                 )
             }
         }

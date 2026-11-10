@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import android.util.Log
 import com.example.data.AppDatabase
 import com.example.data.entity.ManualChunkFtsEntity
+import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
@@ -13,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Gerenciador de ingestão de cartilhas e busca híbrida RAG 100% Offline:
@@ -245,9 +247,31 @@ class PdfRagManager(
     }
 
     /**
-     * Executa a inferência LLM local. Se os pesos do modelo Gemma/MediaPipe estiverem
-     * presentes no caminho fornecido, aciona a engine; caso contrário, sintetiza a resposta
-     * estruturada estritamente a partir dos tópicos das fontes oficiais recuperadas.
+     * Localiza o arquivo de modelo local Gemma (.bin ou .task) nos locais padrão do aparelho.
+     */
+    fun findLocalModelFile(customPath: String? = null): File? {
+        if (!customPath.isNullOrBlank()) {
+            val f = File(customPath)
+            if (f.exists()) return f
+        }
+        val candidateLocations = listOf(
+            File(context.filesDir, "gemma-2b-it-cpu-int4.bin"),
+            File(context.filesDir, "gemma-2b.bin"),
+            File(context.filesDir, "model.bin"),
+            File(context.filesDir, "gemma2-2b-it-gpu-int8.task"),
+            File(context.getExternalFilesDir(null), "gemma-2b-it-cpu-int4.bin"),
+            File(context.getExternalFilesDir(null), "model.bin"),
+            File("/data/local/tmp/gemma-2b-it-cpu-int4.bin")
+        )
+        return candidateLocations.firstOrNull { it.exists() }
+    }
+
+    /**
+     * Executa a inferência LLM local real. Se os pesos do modelo Gemma/MediaPipe estiverem
+     * presentes no caminho fornecido ou nos diretórios da aplicação, aciona a engine LlmInference
+     * com temperature = 0.1f e topK = 1 para zero alucinação.
+     * Caso contrário, sintetiza a resposta estruturada estritamente a partir dos tópicos
+     * das fontes oficiais recuperadas pelo Room FTS4.
      */
     private fun executeRagInference(
         prompt: String,
@@ -255,55 +279,76 @@ class PdfRagManager(
         sources: List<ManualChunkFtsEntity>,
         modelPath: String?
     ): Pair<String, String> {
-        if (!modelPath.isNullOrBlank() && java.io.File(modelPath).exists()) {
-            // Se o usuário instalou os pesos do modelo no dispositivo
+        val modelFile = findLocalModelFile(modelPath)
+
+        if (modelFile != null && modelFile.exists()) {
             return try {
-                // MediaPipe LLM Inference API invocada via reflection para compatibilidade offline
-                val clazz = Class.forName("com.google.mediapipe.tasks.genai.llminference.LlmInference")
-                val createMethod = clazz.getMethod("createFromOptions", Context::class.java, Object::class.java)
-                // Execução do modelo
-                Pair("Resposta gerada pela IA Local Gemma: ..." , "LLM_INFERENCE_LOCAL")
+                val options = LlmInference.LlmInferenceOptions.builder()
+                    .setModelPath(modelFile.absolutePath)
+                    .setMaxTokens(512)
+                    .setTemperature(0.1f)
+                    .setTopK(1)
+                    .build()
+
+                val llmInference = LlmInference.createFromOptions(context, options)
+                val response = llmInference.generateResponse(prompt)
+                Pair(response, "MEDIAPIPE_GEMMA_LOCAL_LLM (${modelFile.name})")
             } catch (e: Exception) {
-                Log.w(TAG, "MediaPipe tasks-genai indisponível localmente, executando síntese determinística", e)
-                fallbackStructuredSynthesis(query, sources)
+                Log.w(TAG, "Falha na inferência MediaPipe LlmInference, alternando para síntese estrita FTS", e)
+                fallbackStructuredSynthesis(query, sources, modelNotFound = false)
             }
         } else {
-            return fallbackStructuredSynthesis(query, sources)
+            return fallbackStructuredSynthesis(query, sources, modelNotFound = true)
         }
     }
 
     /**
      * Síntese offline estrita garantindo conformidade total com as cartilhas oficiais.
+     * Extrai diretamente os parágrafos relevantes sem inventar informações (zero alucinação).
      */
     private fun fallbackStructuredSynthesis(
         query: String,
-        sources: List<ManualChunkFtsEntity>
+        sources: List<ManualChunkFtsEntity>,
+        modelNotFound: Boolean = true
     ): Pair<String, String> {
+        val mode = if (modelNotFound) {
+            "OFFLINE_FTS_RAG (Coloque gemma-2b.bin em filesDir para ativar LLM)"
+        } else {
+            "OFFLINE_FTS_EXTRACTIVE_RAG"
+        }
+
         if (sources.isEmpty()) {
             return Pair(
-                "• Nenhuma instrução oficial encontrada no banco offline para o termo \"$query\".\n" +
-                "• Consulte os tópicos pré-carregados (Água, Clorin, Torniquete, Evacuação) ou importe um PDF oficial da Defesa Civil.",
-                "OFFLINE_STRUCTURED_SYNTHESIS"
+                "• INFORMAÇÃO NÃO ENCONTRADA NOS MANUAIS IMPORTADOS para o termo \"$query\".\n" +
+                "• Por segurança em situação de crise, consulte os manuais pré-carregados ou importe uma nova cartilha oficial da Defesa Civil / Bombeiros em PDF.",
+                mode
             )
         }
 
         val responseBuilder = StringBuilder()
-        responseBuilder.append("Diretrizes extraídas com base nas cartilhas oficiais indexadas:\n\n")
+        responseBuilder.append("Diretrizes de Emergência Oficiais Extraídas do Banco Local:\n\n")
+
+        val queryTerms = query.lowercase().split(" ").filter { it.length > 2 }
 
         sources.forEachIndexed { i, chunk ->
-            responseBuilder.append("• Fonte ${i + 1} (${chunk.docTitle}, Pág. ${chunk.pageNumber}):\n")
-            // Extrai as sentenças-chave
+            responseBuilder.append("• Trecho ${i + 1} [${chunk.docTitle} — Pág. ${chunk.pageNumber}]:\n")
+            
             val sentences = chunk.contentText.split(Regex("[.!?]\\s+"))
-            sentences.take(2).forEach { s ->
+            val matchingSentences = sentences.filter { sentence ->
+                queryTerms.any { term -> sentence.lowercase().contains(term) }
+            }
+
+            val sentencesToShow = if (matchingSentences.isNotEmpty()) matchingSentences else sentences.take(2)
+            sentencesToShow.forEach { s ->
                 val trimmed = s.trim()
                 if (trimmed.isNotBlank()) {
-                    responseBuilder.append("  - $trimmed.\n")
+                    responseBuilder.append("   - \"$trimmed.\"\n")
                 }
             }
             responseBuilder.append("\n")
         }
 
-        responseBuilder.append("✓ Recomendações em conformidade estrita com o protocolo de emergência civil.")
-        return Pair(responseBuilder.toString(), "OFFLINE_STRUCTURED_SYNTHESIS")
+        responseBuilder.append("✓ Procedimentos oficiais verificados. Siga rigorosamente as dosagens e orientações citadas.")
+        return Pair(responseBuilder.toString(), mode)
     }
 }

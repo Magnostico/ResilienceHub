@@ -215,17 +215,34 @@ fun ManualsAiScreen(
                         Spacer(modifier = Modifier.height(8.dp))
 
                         Text(
-                            text = "Fontes Oficiais das Cartilhas:",
+                            text = "Auditoria Visual (Trechos Oficiais Originais do PDF):",
                             fontWeight = FontWeight.Bold,
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.primary
                         )
                         rag.citedSources.forEach { s ->
-                            Text(
-                                text = "• ${s.docTitle} (Página ${s.pageNumber})",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Surface(
+                                color = if (crisisMode) Color(0xFF0F172A) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(6.dp)) {
+                                    Text(
+                                        text = "📄 ${s.docTitle} (Página ${s.pageNumber} • ${s.category}):",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF38BDF8)
+                                    )
+                                    Text(
+                                        text = "\"${s.contentText}\"",
+                                        fontSize = 10.sp,
+                                        lineHeight = 14.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
                     }
                 }

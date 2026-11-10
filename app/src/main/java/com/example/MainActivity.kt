@@ -1,9 +1,13 @@
 package com.example
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,6 +43,28 @@ class MainActivity : ComponentActivity() {
             var showAddItemDialog by remember { mutableStateOf(false) }
             var showAddPoiDialog by remember { mutableStateOf(false) }
             var showAddProfileDialog by remember { mutableStateOf(false) }
+
+            val permissionsToRequest = remember {
+                val list = mutableListOf(
+                    Manifest.permission.CAMERA,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    list.add(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                list.toTypedArray()
+            }
+
+            val multiplePermissionLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestMultiplePermissions()
+            ) { _ ->
+                // Permissões de hardware avaliadas
+            }
+
+            LaunchedEffect(Unit) {
+                multiplePermissionLauncher.launch(permissionsToRequest)
+            }
 
             ResilienceHubTheme(isCrisisMode = state.crisisMode) {
                 Scaffold(
