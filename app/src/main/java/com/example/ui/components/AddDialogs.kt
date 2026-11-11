@@ -1,6 +1,13 @@
 package com.example.ui.components
 
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
+import android.os.ParcelFileDescriptor
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -15,15 +22,27 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.example.data.entity.FamilyProfileEntity
+import com.example.data.entity.InventoryItemEntity
 import com.example.data.model.FamilyRole
 import com.example.data.model.ItemCategory
 import com.example.data.model.PoiType
 import com.example.data.model.StorageLocation
+import com.example.ui.FamilyDocument
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.Normalizer
 import java.util.Calendar
 import java.util.Locale
 
@@ -44,9 +63,15 @@ private val MONTH_OPTIONS = listOf(
 
 private val YEAR_OPTIONS = (2026..2035).toList()
 
+private fun normalizeForSearch(input: String): String {
+    val nfd = Normalizer.normalize(input.lowercase(Locale.getDefault()), Normalizer.Form.NFD)
+    return Regex("\\p{InCombiningDiacriticalMarks}+").replace(nfd, "").trim()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddItemDialog(
+    existingItems: List<InventoryItemEntity> = emptyList(),
     onDismiss: () -> Unit,
     onConfirm: (
         name: String,
@@ -74,6 +99,48 @@ fun AddItemDialog(
     var hasExpiration by remember { mutableStateOf(true) }
     var monthText by remember { mutableStateOf(String.format(Locale.US, "%02d", defaultMonth)) }
     var yearText by remember { mutableStateOf(defaultYear.toString()) }
+    var hideSuggestionsAfterPick by remember { mutableStateOf(false) }
+
+    // Lista sem duplicatas dos itens já cadastrados pelo usuário para sugestão inteligente
+    val uniqueRegisteredItems = remember(existingItems) {
+        existingItems
+            .sortedByDescending { it.id }
+            .distinctBy { normalizeForSearch(it.name) }
+    }
+
+    // Filtra itens já cadastrados conforme o usuário digita
+    val matchingSuggestions = remember(name, uniqueRegisteredItems, hideSuggestionsAfterPick) {
+        if (hideSuggestionsAfterPick) {
+            emptyList()
+        } else {
+            val queryNorm = normalizeForSearch(name)
+            if (queryNorm.isEmpty()) {
+                emptyList()
+            } else {
+                uniqueRegisteredItems.filter { item ->
+                    val itemNorm = normalizeForSearch(item.name)
+                    itemNorm.contains(queryNorm) && itemNorm != queryNorm
+                }.take(5)
+            }
+        }
+    }
+
+    val applySuggestion: (InventoryItemEntity) -> Unit = { suggested ->
+        name = suggested.name
+        if (!suggested.barcode.isNullOrBlank()) {
+            barcode = suggested.barcode
+        }
+        selectedCategory = suggested.category
+        selectedLocation = suggested.location
+        unitText = suggested.unit
+        hasExpiration = suggested.expirationDate != null || suggested.category != ItemCategory.ENERGY_GEAR
+        if (suggested.expirationDate != null) {
+            val cal = Calendar.getInstance().apply { timeInMillis = suggested.expirationDate }
+            monthText = String.format(Locale.US, "%02d", cal.get(Calendar.MONTH) + 1)
+            yearText = cal.get(Calendar.YEAR).toString()
+        }
+        hideSuggestionsAfterPick = true
+    }
 
     val textFieldColors = OutlinedTextFieldDefaults.colors(
         focusedTextColor = Color.White,
@@ -95,14 +162,116 @@ fun AddItemDialog(
             ) {
                 OutlinedTextField(
                     value = name,
-                    onValueChange = { name = it },
+                    onValueChange = {
+                        name = it
+                        hideSuggestionsAfterPick = false
+                    },
                     label = { Text("Nome do Item", color = Color(0xFFCBD5E1)) },
+                    placeholder = { Text("Digite para ver sugestões do seu estoque...", fontSize = 11.sp, color = Color(0xFF64748B)) },
                     colors = textFieldColors,
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("input_item_name")
                 )
+
+                // --- SUGESTÕES EM TEMPO REAL CONFORME O USUÁRIO DIGITA ---
+                if (matchingSuggestions.isNotEmpty()) {
+                    Surface(
+                        color = Color(0xFF090D16),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Color(0xFFFBBF24)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFBBF24),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "Sugestões baseadas no seu estoque (toque para preencher):",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFFFBBF24)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            matchingSuggestions.forEach { suggested ->
+                                Surface(
+                                    color = Color(0xFF1E293B),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp)
+                                        .clickable { applySuggestion(suggested) }
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = suggested.name,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = Color.White,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = "${suggested.category.displayName} • ${if (suggested.location == StorageLocation.APARTMENT) "Apartamento" else "Mochila 72h"} • Un: ${suggested.unit}",
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF38BDF8)
+                                            )
+                                        }
+                                        Icon(
+                                            Icons.Default.NorthWest,
+                                            contentDescription = "Preencher",
+                                            tint = Color(0xFFFBBF24),
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (name.isBlank() && uniqueRegisteredItems.isNotEmpty()) {
+                    // Chips de preenchimento rápido com os itens já cadastrados mesmo antes de digitar
+                    Column {
+                        Text(
+                            text = "Seus itens cadastrados (toque para repetir cadastro):",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF94A3B8)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(uniqueRegisteredItems.take(10)) { existing ->
+                                SuggestionChip(
+                                    onClick = { applySuggestion(existing) },
+                                    label = {
+                                        Text(
+                                            text = existing.name,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            maxLines = 1
+                                        )
+                                    },
+                                    colors = SuggestionChipDefaults.suggestionChipColors(
+                                        containerColor = Color(0xFF1E293B)
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
 
                 // Código de barras com botão de escaneamento por câmera
                 Row(
@@ -111,7 +280,14 @@ fun AddItemDialog(
                 ) {
                     OutlinedTextField(
                         value = barcode,
-                        onValueChange = { barcode = it },
+                        onValueChange = { code ->
+                            barcode = code
+                            // Se o código de barras já existir no estoque, preenche automaticamente
+                            val matchByCode = uniqueRegisteredItems.find { it.barcode == code && code.isNotBlank() }
+                            if (matchByCode != null && name.isBlank()) {
+                                applySuggestion(matchByCode)
+                            }
+                        },
                         label = { Text("Código EAN-13 (Opcional)", color = Color(0xFFCBD5E1)) },
                         leadingIcon = {
                             Icon(Icons.Default.QrCodeScanner, contentDescription = null, tint = Color(0xFF38BDF8))
@@ -385,6 +561,10 @@ fun AddItemDialog(
             onDismiss = { showBarcodeScanner = false },
             onBarcodeScanned = { scannedCode ->
                 barcode = scannedCode
+                val matchByCode = uniqueRegisteredItems.find { it.barcode == scannedCode }
+                if (matchByCode != null) {
+                    applySuggestion(matchByCode)
+                }
             }
         )
     }
@@ -829,7 +1009,470 @@ fun AddProfileDialog(
 }
 
 /**
- * Dialog para o usuário criar seu próprio Manual / Protocolo / Anotação de Sobrevivência offline.
+ * Dialog para Editar um membro familiar já cadastrado.
+ */
+@Composable
+fun EditProfileDialog(
+    profile: FamilyProfileEntity,
+    onDismiss: () -> Unit,
+    onConfirm: (id: Long, name: String, role: FamilyRole, weightKg: Double, bloodType: String, allergies: String, medications: String) -> Unit
+) {
+    var name by remember(profile.id) { mutableStateOf(profile.name) }
+    var selectedRole by remember(profile.id) { mutableStateOf(profile.role) }
+    var weightText by remember(profile.id) { mutableStateOf(String.format(Locale.US, "%.0f", profile.weightKg)) }
+    var bloodType by remember(profile.id) { mutableStateOf(profile.bloodType) }
+    var allergies by remember(profile.id) { mutableStateOf(profile.allergies) }
+    var medications by remember(profile.id) { mutableStateOf(profile.medications) }
+
+    val bloodTypes = listOf("O+", "O-", "A+", "A-", "B+", "B-", "AB+", "AB-")
+
+    val textFieldColors = OutlinedTextFieldDefaults.colors(
+        focusedTextColor = Color.White,
+        unfocusedTextColor = Color.White,
+        focusedBorderColor = Color(0xFFFBBF24),
+        unfocusedBorderColor = Color(0xFF475569)
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        title = { Text("Editar Ficha Familiar", fontWeight = FontWeight.ExtraBold) },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Nome do Familiar", color = Color(0xFFCBD5E1)) },
+                    colors = textFieldColors,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("Perfil Etário:", style = MaterialTheme.typography.labelMedium, color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FamilyRole.values().forEach { r ->
+                        val isSel = selectedRole == r
+                        FilterChip(
+                            selected = isSel,
+                            onClick = { selectedRole = r },
+                            label = {
+                                Text(
+                                    r.displayName,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSel) Color(0xFF090D16) else Color.White
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFFFBBF24),
+                                containerColor = Color(0xFF1E293B)
+                            )
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = weightText,
+                        onValueChange = { weightText = it },
+                        label = { Text("Peso (kg)", color = Color(0xFFCBD5E1)) },
+                        colors = textFieldColors,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = bloodType,
+                        onValueChange = { bloodType = it },
+                        label = { Text("Tipo Sanguíneo", color = Color(0xFFCBD5E1)) },
+                        colors = textFieldColors,
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    items(bloodTypes) { bt ->
+                        val isSel = bloodType.equals(bt, ignoreCase = true)
+                        FilterChip(
+                            selected = isSel,
+                            onClick = { bloodType = bt },
+                            label = {
+                                Text(
+                                    bt,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSel) Color.White else Color(0xFFCBD5E1)
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFFDC2626),
+                                containerColor = Color(0xFF1E293B)
+                            )
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = allergies,
+                    onValueChange = { allergies = it },
+                    label = { Text("Alergias Medicamentosas / Alimentares", color = Color(0xFFCBD5E1)) },
+                    colors = textFieldColors,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = medications,
+                    onValueChange = { medications = it },
+                    label = { Text("Medicações Contínuas / Posologia", color = Color(0xFFCBD5E1)) },
+                    colors = textFieldColors,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (name.isNotBlank()) {
+                        val w = weightText.replace(",", ".").toDoubleOrNull() ?: profile.weightKg
+                        onConfirm(
+                            profile.id,
+                            name.trim(),
+                            selectedRole,
+                            w,
+                            bloodType.ifBlank { "O+" },
+                            allergies.ifBlank { "Nenhuma declarada" },
+                            medications.ifBlank { "Nenhuma de uso contínuo" }
+                        )
+                        onDismiss()
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFF59E0B),
+                    contentColor = Color(0xFF090D16)
+                )
+            ) {
+                Text("Salvar Alterações", fontWeight = FontWeight.ExtraBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar", color = Color(0xFFCBD5E1))
+            }
+        }
+    )
+}
+
+/**
+ * Dialog para classificar e vincular um PDF de Receita Médica ou Documento da Família.
+ */
+@Composable
+fun ImportFamilyDocDialog(
+    pendingUri: Uri,
+    defaultTitle: String,
+    familyMembers: List<FamilyProfileEntity>,
+    onDismiss: () -> Unit,
+    onConfirm: (uri: Uri, title: String, docType: String, memberName: String) -> Unit
+) {
+    var title by remember(pendingUri) { mutableStateOf(defaultTitle) }
+    var selectedType by remember { mutableStateOf("RECEITA_MEDICA") }
+    var selectedMember by remember { mutableStateOf(familyMembers.firstOrNull()?.name ?: "Toda a Família") }
+
+    val docTypes = listOf(
+        "RECEITA_MEDICA" to "💊 Receita Médica",
+        "DOCUMENTO_PESSOAL" to "🪪 RG / CPF / Certidão",
+        "LAUDO_EXAME" to "📋 Laudo / Exame",
+        "VACINACAO" to "💉 Carteira Vacinação"
+    )
+
+    val memberOptions = remember(familyMembers) {
+        listOf("Toda a Família") + familyMembers.map { it.name }
+    }
+
+    val textFieldColors = OutlinedTextFieldDefaults.colors(
+        focusedTextColor = Color.White,
+        unfocusedTextColor = Color.White,
+        focusedBorderColor = Color(0xFFFBBF24),
+        unfocusedBorderColor = Color(0xFF475569)
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        title = { Text("Importar PDF da Família", fontWeight = FontWeight.ExtraBold) },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Título da Receita ou Documento", color = Color(0xFFCBD5E1)) },
+                    placeholder = { Text("Ex: Receita Uso Contínuo / RG Digitalizado", fontSize = 11.sp, color = Color(0xFF64748B)) },
+                    colors = textFieldColors,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("Categoria do PDF:", style = MaterialTheme.typography.labelMedium, color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    docTypes.forEach { (code, label) ->
+                        val isSel = selectedType == code
+                        FilterChip(
+                            selected = isSel,
+                            onClick = { selectedType = code },
+                            label = {
+                                Text(
+                                    label,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSel) Color(0xFF090D16) else Color.White
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFFFBBF24),
+                                containerColor = Color(0xFF1E293B)
+                            )
+                        )
+                    }
+                }
+
+                Text("Vincular ao Familiar:", style = MaterialTheme.typography.labelMedium, color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(memberOptions) { member ->
+                        val isSel = selectedMember == member
+                        FilterChip(
+                            selected = isSel,
+                            onClick = { selectedMember = member },
+                            label = {
+                                Text(
+                                    member,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSel) Color.White else Color(0xFFCBD5E1)
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF0284C7),
+                                containerColor = Color(0xFF1E293B)
+                            )
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onConfirm(
+                        pendingUri,
+                        title.trim().ifBlank { "Documento Familiar" },
+                        selectedType,
+                        selectedMember
+                    )
+                    onDismiss()
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFF59E0B),
+                    contentColor = Color(0xFF090D16)
+                )
+            ) {
+                Text("Salvar PDF Offline", fontWeight = FontWeight.ExtraBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar", color = Color(0xFFCBD5E1))
+            }
+        }
+    )
+}
+
+/**
+ * Visualizador Nativo Offline de PDFs de Receitas Médicas e Documentos da Família.
+ */
+@Composable
+fun FamilyPdfViewerDialog(
+    document: FamilyDocument,
+    onDismiss: () -> Unit
+) {
+    var currentPage by remember { mutableIntStateOf(0) }
+    var totalPages by remember { mutableIntStateOf(document.pageCount.coerceAtLeast(1)) }
+    var renderedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(document.filePath, currentPage) {
+        withContext(Dispatchers.IO) {
+            try {
+                val file = File(document.filePath)
+                if (file.exists()) {
+                    val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                    val renderer = PdfRenderer(pfd)
+                    totalPages = renderer.pageCount.coerceAtLeast(1)
+                    val safeIndex = currentPage.coerceIn(0, totalPages - 1)
+                    val page = renderer.openPage(safeIndex)
+                    val width = (page.width * 2).coerceAtLeast(600)
+                    val height = (page.height * 2).coerceAtLeast(800)
+                    val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                    bmp.eraseColor(android.graphics.Color.WHITE)
+                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    page.close()
+                    renderer.close()
+                    pfd.close()
+                    renderedBitmap = bmp
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            color = Color(0xFF090D16),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Topo do leitor de PDF
+                Surface(
+                    color = Color(0xFF111827),
+                    border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = document.title,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "Familiar: ${document.memberName} • Pág. ${currentPage + 1} de $totalPages",
+                                fontSize = 11.sp,
+                                color = Color(0xFFFBBF24)
+                            )
+                        }
+                        Button(
+                            onClick = onDismiss,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFDC2626),
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Fechar", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                // Corpo com a página renderizada + texto extraído
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    val bmp = renderedBitmap
+                    if (bmp != null) {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color.White),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = "Página do PDF",
+                                contentScale = ContentScale.FillWidth,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    } else {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(260.dp)
+                                .background(Color(0xFF111827), RoundedCornerShape(10.dp))
+                        ) {
+                            CircularProgressIndicator(color = Color(0xFFFBBF24))
+                        }
+                    }
+
+                    if (totalPages > 1) {
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedButton(
+                                onClick = { if (currentPage > 0) currentPage-- },
+                                enabled = currentPage > 0
+                            ) {
+                                Text("← Página Anterior", color = Color.White)
+                            }
+                            Text(
+                                text = "${currentPage + 1} / $totalPages",
+                                color = Color(0xFFFBBF24),
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            OutlinedButton(
+                                onClick = { if (currentPage < totalPages - 1) currentPage++ },
+                                enabled = currentPage < totalPages - 1
+                            ) {
+                                Text("Próxima Página →", color = Color.White)
+                            }
+                        }
+                    }
+
+                    // Transcrição em texto extraída do PDF
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Color(0xFF334155)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = "Texto Extraído para Leitura Rápida:",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 12.sp,
+                                color = Color(0xFF38BDF8)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = document.extractedText,
+                                fontSize = 12.sp,
+                                lineHeight = 18.sp,
+                                color = Color(0xFFE2E8F0)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dialog para o usuário criar uma Nota / Protocolo Familiar adicional na Base de Conhecimento da IA.
  */
 @Composable
 fun AddManualChunkDialog(
@@ -837,16 +1480,16 @@ fun AddManualChunkDialog(
     onConfirm: (docTitle: String, category: String, pageNumber: Int, contentText: String) -> Unit
 ) {
     var docTitle by remember { mutableStateOf("") }
-    var selectedCategory by remember { mutableStateOf("WATER") }
+    var selectedCategory by remember { mutableStateOf("GENERAL") }
     var pageText by remember { mutableStateOf("1") }
     var contentText by remember { mutableStateOf("") }
 
     val categories = listOf(
-        "WATER" to "Água & Purificação",
-        "MEDS" to "Primeiros Socorros",
-        "EVACUATION" to "Evacuação 72h",
-        "ENERGY_GEAR" to "Energia & Rádio",
-        "GENERAL" to "Protocolo Geral"
+        "GENERAL" to "Plano Familiar",
+        "WAR_CONFLICT" to "Defesa / Conflito",
+        "WATER" to "Água",
+        "MEDS" to "Saúde / Primeiros Socorros",
+        "EVACUATION" to "Evacuação 72h"
     )
 
     val textFieldColors = OutlinedTextFieldDefaults.colors(
@@ -861,7 +1504,7 @@ fun AddManualChunkDialog(
         containerColor = Color(0xFF111827),
         titleContentColor = Color.White,
         textContentColor = Color.White,
-        title = { Text("Criar Novo Manual / Protocolo", fontWeight = FontWeight.ExtraBold) },
+        title = { Text("Adicionar Nota / Protocolo à IA", fontWeight = FontWeight.ExtraBold) },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -870,7 +1513,7 @@ fun AddManualChunkDialog(
                 OutlinedTextField(
                     value = docTitle,
                     onValueChange = { docTitle = it },
-                    label = { Text("Título do Manual / Protocolo", color = Color(0xFFCBD5E1)) },
+                    label = { Text("Título do Protocolo", color = Color(0xFFCBD5E1)) },
                     placeholder = { Text("Ex: Plano de Evacuação da Nossa Família", fontSize = 11.sp, color = Color(0xFF64748B)) },
                     colors = textFieldColors,
                     singleLine = true,
@@ -901,20 +1544,10 @@ fun AddManualChunkDialog(
                 }
 
                 OutlinedTextField(
-                    value = pageText,
-                    onValueChange = { if (it.all { c -> c.isDigit() }) pageText = it },
-                    label = { Text("Página / Seção", color = Color(0xFFCBD5E1)) },
-                    colors = textFieldColors,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
                     value = contentText,
                     onValueChange = { contentText = it },
-                    label = { Text("Conteúdo / Instruções Detalhadas", color = Color(0xFFCBD5E1)) },
-                    placeholder = { Text("Digite as orientações que ficarão salvas e pesquisáveis na IA Local e FTS...", fontSize = 11.sp, color = Color(0xFF64748B)) },
+                    label = { Text("Instruções para o RAG da IA", color = Color(0xFFCBD5E1)) },
+                    placeholder = { Text("Digite as orientações que também serão respondidas no Chat da IA...", fontSize = 11.sp, color = Color(0xFF64748B)) },
                     colors = textFieldColors,
                     minLines = 4,
                     maxLines = 8,
@@ -936,7 +1569,7 @@ fun AddManualChunkDialog(
                     contentColor = Color(0xFF090D16)
                 )
             ) {
-                Text("Salvar Manual", fontWeight = FontWeight.ExtraBold)
+                Text("Salvar na Base IA", fontWeight = FontWeight.ExtraBold)
             }
         },
         dismissButton = {

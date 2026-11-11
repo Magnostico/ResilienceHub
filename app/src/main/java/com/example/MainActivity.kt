@@ -112,16 +112,6 @@ class MainActivity : ComponentActivity() {
                                     Icon(Icons.Default.AddLocationAlt, contentDescription = "Adicionar Ponto")
                                 }
                             }
-                            2 -> {
-                                FloatingActionButton(
-                                    onClick = { showAddManualDialog = true },
-                                    containerColor = Color(0xFFF59E0B),
-                                    contentColor = Color(0xFF090D16),
-                                    modifier = Modifier.testTag("fab_add_manual")
-                                ) {
-                                    Icon(Icons.Default.NoteAdd, contentDescription = "Criar Manual")
-                                }
-                            }
                             4 -> {
                                 FloatingActionButton(
                                     onClick = { showAddProfileDialog = true },
@@ -170,6 +160,7 @@ class MainActivity : ComponentActivity() {
 
                     if (showAddItemDialog) {
                         AddItemDialog(
+                            existingItems = state.allRegisteredItems,
                             onDismiss = { showAddItemDialog = false },
                             onConfirm = { name, barcode, category, location, qty, unit, expMonth, expYear ->
                                 viewModel.addNewItemWithMonthYear(
@@ -217,9 +208,9 @@ class MainActivity : ComponentActivity() {
 
                     if (showConfirmClearAllApp) {
                         ConfirmClearDialog(
-                            title = "Apagar Todos os Dados Fictícios?",
-                            message = "Isso apagará de uma só vez todos os itens fictícios de Estoque, Família, Pontos do Mapa e Manuais para que você possa cadastrar 100% os seus próprios dados.",
-                            confirmButtonText = "Sim, Zerar Tudo",
+                            title = "Apagar Dados Fictícios?",
+                            message = "Isso apagará todos os itens fictícios de Estoque, Família e Pontos do Mapa para você cadastrar os seus próprios dados (a Base Oficial de Sobrevivência do Chat IA será mantida).",
+                            confirmButtonText = "Sim, Zerar Dados",
                             onDismiss = { showConfirmClearAllApp = false },
                             onConfirm = { viewModel.clearAllFictionalData() }
                         )
@@ -405,8 +396,8 @@ fun ResilienceBottomBar(
         NavigationBarItem(
             selected = selectedTab == 2,
             onClick = { onTabSelected(2) },
-            icon = { Icon(Icons.Default.MenuBook, contentDescription = "Manuais") },
-            label = { Text("Manuais", fontSize = 11.sp, fontWeight = if (selectedTab == 2) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            icon = { Icon(Icons.Default.Forum, contentDescription = "Chat IA") },
+            label = { Text("Chat IA", fontSize = 11.sp, fontWeight = if (selectedTab == 2) FontWeight.ExtraBold else FontWeight.SemiBold) },
             colors = itemColors,
             modifier = Modifier.testTag("tab_manuals")
         )

@@ -1,6 +1,7 @@
 package com.example.data.repository
 
 import com.example.data.AppDatabase
+import com.example.data.OfficialSurvivalKnowledgeBase
 import com.example.data.entity.FamilyProfileEntity
 import com.example.data.entity.InventoryItemEntity
 import com.example.data.entity.ManualChunkFtsEntity
@@ -9,6 +10,7 @@ import com.example.data.model.ItemCategory
 import com.example.data.model.PoiType
 import com.example.data.model.StorageLocation
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 
 class ResilienceRepository(private val database: AppDatabase) {
 
@@ -105,10 +107,33 @@ class ResilienceRepository(private val database: AppDatabase) {
     suspend fun clearAllManualChunks() =
         database.manualChunkDao().clearAll()
 
+    /**
+     * Garante que a Base Oficial de Sobrevivência (30 diretrizes dos Órgãos Oficiais)
+     * esteja sempre populada no banco de dados (mesmo em atualizações sobre instalações anteriores).
+     */
+    suspend fun ensureOfficialKnowledgeBaseSeeded() {
+        val currentChunks = database.manualChunkDao().getAllChunks().first()
+        if (currentChunks.size < OfficialSurvivalKnowledgeBase.MIN_EXPECTED_OFFICIAL_CHUNKS) {
+            val customChunks = currentChunks.filter { it.rowId > 100 }
+            database.manualChunkDao().clearAll()
+            database.manualChunkDao().insertAll(OfficialSurvivalKnowledgeBase.getOfficialChunks())
+            if (customChunks.isNotEmpty()) {
+                database.manualChunkDao().insertAll(customChunks)
+            }
+        }
+    }
+
+    suspend fun restoreOfficialKnowledgeBase() {
+        database.manualChunkDao().clearAll()
+        database.manualChunkDao().insertAll(OfficialSurvivalKnowledgeBase.getOfficialChunks())
+    }
+
     suspend fun clearAllDatabaseData() {
         database.inventoryDao().clearAll()
         database.familyProfileDao().clearAll()
         database.mapPoiDao().clearAll()
+        // Mantém a Base Oficial de Sobrevivência dos órgãos oficiais para o Chat IA continuar funcionando!
         database.manualChunkDao().clearAll()
+        database.manualChunkDao().insertAll(OfficialSurvivalKnowledgeBase.getOfficialChunks())
     }
 }

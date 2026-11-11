@@ -498,44 +498,8 @@ abstract class AppDatabase : RoomDatabase() {
             )
             database.mapPoiDao().insertAll(initialPois)
 
-            // 4. Initial FTS Survival Manual Chunks
-            val initialChunks = listOf(
-                ManualChunkFtsEntity(
-                    rowId = 1,
-                    docTitle = "Manual Defesa Civil: Tratamento de Água em Colapso",
-                    category = "WATER",
-                    pageNumber = 1,
-                    contentText = "Em situações de colapso no abastecimento público, ferva a água vigorosamente por pelo menos 1 minuto (3 minutos em altitudes elevadas). Para purificação química com Clorin (dicloroisocianurato de sódio), adicione 1 comprimido de 1mg para cada 1 litro de água límpida e aguarde 30 minutos de repouso antes de consumir. Se a água estiver turva, filtre previamente com tecido limpo ou filtro cerâmico e dobre o tempo de repouso."
-                ),
-                ManualChunkFtsEntity(
-                    rowId = 2,
-                    docTitle = "Manual Tático de Sobrevivência: Regra dos Três",
-                    category = "GENERAL",
-                    pageNumber = 1,
-                    contentText = "Priorização fisiológica e psicológica em emergências extremas: 3 minutos sem oxigênio ou em ambiente com gases tóxicos; 3 horas sem abrigo adequado sob condições climáticas severas (risco de hipotermia ou insolação); 3 dias sem água potável antes do colapso das funções renais; 3 semanas sem alimento se houver hidratação mínima."
-                ),
-                ManualChunkFtsEntity(
-                    rowId = 3,
-                    docTitle = "Protocolo de Medicina Tática: Torniquete CAT",
-                    category = "MEDS",
-                    pageNumber = 2,
-                    contentText = "Em ferimentos exangues de extremidades: 1) Posicione o torniquete tático de 5 a 7 cm acima da lesão (nunca sobre articulações). 2) Puxe a fita com máxima força eliminando qualquer folga. 3) Gire a haste molinete até cessar o sangramento arterial e sumir o pulso distal. 4) Trave o molinete no clipe de retenção e anote o horário exato da aplicação na fita de registro."
-                ),
-                ManualChunkFtsEntity(
-                    rowId = 4,
-                    docTitle = "Protocolo Familiar de Evacuação 72h (Bugout)",
-                    category = "EVACUATION",
-                    pageNumber = 1,
-                    contentText = "Ao soar alerta de evacuação da Defesa Civil: Calce calçados robustos, vista calça e manga comprida. Pegue a Mochila 72h (cada adulto carrega a sua mochila de 12L a 15L de capacidade, criança leva apenas itens leves pessoais). Desligue o disjuntor geral de energia elétrica e o registro geral de gás e água do imóvel. Dirija-se imediatamente a pé ou veículo ao Ponto de Encontro Primário."
-                ),
-                ManualChunkFtsEntity(
-                    rowId = 5,
-                    docTitle = "Diretriz de Manutenção Preventiva de Baterias e Rádio",
-                    category = "ENERGY_GEAR",
-                    pageNumber = 1,
-                    contentText = "Baterias de lítio perdem carga residual e sofrem degradação química se mantidas zeradas ou em calor excessivo. A cada 90 dias, execute o ciclo de descarga parcial e recarga até 80-90% de todos os power banks e lanternas. Ligue o rádio AM/FM de emergência por 5 minutos para desoxidar os contatos internos do potenciômetro e verifique se as vedações de silicone mantêm impermeabilidade."
-                )
-            )
+            // 4. Initial FTS Survival Manual Chunks (Base Oficial Completa dos Órgãos Oficiais)
+            val initialChunks = OfficialSurvivalKnowledgeBase.getOfficialChunks()
             database.manualChunkDao().insertAll(initialChunks)
         }
     }

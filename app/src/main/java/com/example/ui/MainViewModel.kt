@@ -18,6 +18,7 @@ import com.example.domain.RationingAndAlertEngine
 import com.example.services.ExpirationWorker
 import com.example.services.HardwareToolsManager
 import com.example.services.PdfRagManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -25,15 +26,51 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
 import java.util.Locale
+import java.util.UUID
+
+/**
+ * Mensagem individual do Chat de Sobrevivência com IA RAG nos Órgãos Oficiais.
+ */
+data class ChatMessage(
+    val id: String = UUID.randomUUID().toString(),
+    val text: String,
+    val isUser: Boolean,
+    val timestamp: String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()),
+    val executionMode: String? = null,
+    val citedSources: List<ManualChunkFtsEntity> = emptyList()
+)
+
+/**
+ * Documento ou Receita Médica em PDF da Família armazenado 100% offline.
+ */
+data class FamilyDocument(
+    val id: String,
+    val title: String,
+    val docType: String, // "RECEITA_MEDICA", "DOCUMENTO_PESSOAL", "LAUDO_EXAME", "VACINACAO"
+    val memberName: String,
+    val fileName: String,
+    val filePath: String,
+    val pageCount: Int,
+    val extractedText: String,
+    val addedAtMillis: Long
+)
 
 data class MainUiState(
     val crisisMode: Boolean = false,
     val items: List<InventoryItemEntity> = emptyList(),
+    val allRegisteredItems: List<InventoryItemEntity> = emptyList(),
     val evaluatedItems: List<RationingAndAlertEngine.ItemEvaluationResult> = emptyList(),
     val waterReport: RationingAndAlertEngine.WaterAutonomyReport? = null,
     val profiles: List<FamilyProfileEntity> = emptyList(),
+    val familyDocuments: List<FamilyDocument> = emptyList(),
     val pois: List<MapPoiEntity> = emptyList(),
     val poiNavigationList: List<RationingAndAlertEngine.PoiNavigationInfo> = emptyList(),
     val manualChunks: List<ManualChunkFtsEntity> = emptyList(),
@@ -49,17 +86,18 @@ data class MainUiState(
     val currentAccuracyMeters: Float = 0f,
     val movementTrail: List<Pair<Double, Double>> = emptyList(),
     val gpsProviderInfo: String = "GPS STANDBY (Economia)",
-    val selectedTab: Int = 0, // 0: Estoque, 1: Mapas, 2: Manuais IA, 3: Ferramentas, 4: Família
+    val selectedTab: Int = 0, // 0: Estoque, 1: Mapas, 2: Chat IA, 3: Ferramentas, 4: Família
 
     // Hardware states
     val isTorchOn: Boolean = false,
     val isSosActive: Boolean = false,
     val isWhistleActive: Boolean = false,
 
-    // RAG states
+    // Chat RAG states
+    val chatMessages: List<ChatMessage> = emptyList(),
     val ragResponse: PdfRagManager.RagResponse? = null,
     val isRagLoading: Boolean = false,
-    val ragModeAi: Boolean = false,
+    val ragModeAi: Boolean = true,
     val pdfImportStatus: String? = null
 )
 
@@ -85,6 +123,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             return cal.timeInMillis
         }
+
+        private fun createWelcomeMessage(): ChatMessage = ChatMessage(
+            id = "welcome_msg",
+            text = "Olá! Sou a **IA de Sobrevivência e Defesa Civil da sua família (100% Offline)**.\n\n" +
+                "Meu banco de dados já está populado com **30 protocolos oficiais** da **Defesa Civil Nacional, OMS, Ministério da Saúde, Cruz Vermelha Internacional (CICV), FEMA (Ready.gov), CNEN e Corpo de Bombeiros**, cobrindo:\n" +
+                "• **Guerras, Bombardeios e Conflitos Urbanos** (Regra das 2 Paredes, Onda de Choque)\n" +
+                "• **Emergência Nuclear, Fallout e Armas Químicas** (Regra 7/10, Abrigo, Descontaminação)\n" +
+                "• **Água e Alimentação** (Hipoclorito 2,5%, Clorin, Fervura, Conservação sem Geladeira)\n" +
+                "• **Primeiros Socorros** (Hemorragias/Torniquete, RCP, Engasgo Adulto e Bebê, Queimaduras, Soro Caseiro, Fraturas, Cobras/Escorpiões)\n" +
+                "• **Catástrofes Naturais e Infraestrutura** (Enchentes, Deslizamentos, Terremotos, Apagão, Gaiola de Faraday EMP e Banheiro Seco).\n\n" +
+                "Qual situação você quer consultar agora?",
+            isUser = false,
+            executionMode = "BASE OFICIAL PRONTA • 30 PROTOCOLOS OFICIAIS"
+        )
     }
 
     private val database = AppDatabase.getInstance(application)
@@ -93,6 +145,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val hardwareToolsManager = HardwareToolsManager(application)
     val pdfRagManager = PdfRagManager(application, database)
+
+    private val familyDocsDir = File(application.filesDir, "family_docs").apply {
+        if (!exists()) mkdirs()
+    }
+    private val familyDocsMetaFile = File(familyDocsDir, "family_docs_meta.json")
 
     private val _crisisMode = MutableStateFlow(false)
     private val _selectedLocation = MutableStateFlow<StorageLocation?>(null)
@@ -109,10 +166,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _gpsProviderInfo = MutableStateFlow("GPS STANDBY (Economia)")
     private val _selectedTab = MutableStateFlow(0)
 
-    // RAG Local States
+    // Chat RAG & Family Documents States
+    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(listOf(createWelcomeMessage()))
+    private val _familyDocuments = MutableStateFlow<List<FamilyDocument>>(emptyList())
     private val _ragResponse = MutableStateFlow<PdfRagManager.RagResponse?>(null)
     private val _isRagLoading = MutableStateFlow(false)
-    private val _ragModeAi = MutableStateFlow(false)
+    private val _ragModeAi = MutableStateFlow(true)
     private val _pdfImportStatus = MutableStateFlow<String?>(null)
 
     private val _manualChunks = _manualQuery.flatMapLatest { query ->
@@ -122,6 +181,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         // Agenda a checagem diária em segundo plano do WorkManager
         ExpirationWorker.scheduleDailyCheck(application)
+
+        // Garante que a Base Oficial de Sobrevivência (30 protocolos dos órgãos oficiais)
+        // esteja carregada no banco SQLite FTS4 e carrega os PDFs de Receitas/Documentos da família
+        viewModelScope.launch {
+            repository.ensureOfficialKnowledgeBaseSeeded()
+            _familyDocuments.value = loadFamilyDocumentsFromDisk()
+        }
 
         // Coleta contínua de movimentação GPS em tempo real quando ativado pelo usuário
         viewModelScope.launch {
@@ -190,7 +256,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _ragResponse,
             _isRagLoading,
             _ragModeAi,
-            _pdfImportStatus
+            _pdfImportStatus,
+            _chatMessages,
+            _familyDocuments
         )
     ) { flowsArray: Array<Any?> ->
         @Suppress("UNCHECKED_CAST")
@@ -224,6 +292,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val isRagLoading = flowsArray[22] as Boolean
         val ragModeAi = flowsArray[23] as Boolean
         val pdfImportStatus = flowsArray[24] as? String
+        @Suppress("UNCHECKED_CAST")
+        val chatMessages = flowsArray[25] as List<ChatMessage>
+        @Suppress("UNCHECKED_CAST")
+        val familyDocuments = flowsArray[26] as List<FamilyDocument>
 
         // Filtragem do estoque
         val filteredItems = allItems.filter { item ->
@@ -247,9 +319,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         MainUiState(
             crisisMode = crisisMode,
             items = filteredItems,
+            allRegisteredItems = allItems,
             evaluatedItems = evaluated,
             waterReport = waterReport,
             profiles = profiles,
+            familyDocuments = familyDocuments,
             pois = pois,
             poiNavigationList = navList,
             manualChunks = manualChunks,
@@ -269,6 +343,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isTorchOn = isTorchOn,
             isSosActive = isSosActive,
             isWhistleActive = isWhistleActive,
+            chatMessages = chatMessages,
             ragResponse = ragResponse,
             isRagLoading = isRagLoading,
             ragModeAi = ragModeAi,
@@ -277,7 +352,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
-        initialValue = MainUiState()
+        initialValue = MainUiState(chatMessages = listOf(createWelcomeMessage()))
     )
 
     fun toggleCrisisMode() {
@@ -370,18 +445,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ExpirationWorker.runImmediateCheck(getApplication())
     }
 
-    // --- PDF RAG Operations ---
+    // --- Chat IA RAG Operations (Base Oficial dos Órgãos Oficiais) ---
 
     fun importPdfFromUri(uri: Uri) {
-        viewModelScope.launch {
-            _pdfImportStatus.value = "Importando e extraindo páginas do PDF..."
-            val result = pdfRagManager.ingestPdf(uri)
-            if (result.isSuccess) {
-                _pdfImportStatus.value = "✓ \"${result.docTitle}\" importado: ${result.totalPages} páginas, ${result.chunksGenerated} blocos FTS4 indexados!"
-            } else {
-                _pdfImportStatus.value = "❌ Falha ao importar PDF: ${result.errorMessage}"
-            }
-        }
+        // Caso seja chamado, redireciona para importação de documento familiar padrão
+        importFamilyDocumentPdf(
+            uri = uri,
+            title = pdfRagManager.getFileNameFromUri(uri)?.removeSuffix(".pdf") ?: "Documento da Família",
+            docType = "RECEITA_MEDICA",
+            memberName = "Família"
+        )
     }
 
     fun importModelFromUri(uri: Uri) {
@@ -400,13 +473,172 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Envia uma pergunta no Chat de Sobrevivência e gera a resposta da IA com RAG nos órgãos oficiais.
+     */
     fun askRagQuestion(question: String) {
+        val cleanQuestion = question.trim()
+        if (cleanQuestion.isBlank()) return
+
+        val userMessage = ChatMessage(
+            text = cleanQuestion,
+            isUser = true
+        )
+        _chatMessages.value = _chatMessages.value + userMessage
+
         viewModelScope.launch {
-            if (question.isBlank()) return@launch
             _isRagLoading.value = true
-            val response = pdfRagManager.searchLocalAiRag(question)
+            val response = pdfRagManager.searchLocalAiRag(cleanQuestion)
             _ragResponse.value = response
+
+            val aiMessage = ChatMessage(
+                text = response.answer,
+                isUser = false,
+                executionMode = response.executionMode,
+                citedSources = response.citedSources
+            )
+            _chatMessages.value = _chatMessages.value + aiMessage
             _isRagLoading.value = false
+        }
+    }
+
+    fun clearChatHistory() {
+        _chatMessages.value = listOf(createWelcomeMessage())
+        _ragResponse.value = null
+    }
+
+    fun restoreOfficialKnowledgeBase() {
+        viewModelScope.launch {
+            repository.restoreOfficialKnowledgeBase()
+            _pdfImportStatus.value = "✓ Base Oficial de Sobrevivência (30 diretrizes oficiais) restaurada com sucesso!"
+        }
+    }
+
+    // --- Family Prescriptions & Documents PDF Storage (100% Offline) ---
+
+    fun importFamilyDocumentPdf(
+        uri: Uri,
+        title: String,
+        docType: String,
+        memberName: String
+    ) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                try {
+                    val docId = UUID.randomUUID().toString()
+                    val rawFileName = pdfRagManager.getFileNameFromUri(uri) ?: "receita_documento.pdf"
+                    val safeFileName = "${docId.take(8)}_${rawFileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")}"
+                    val destFile = File(familyDocsDir, if (safeFileName.endsWith(".pdf", true)) safeFileName else "$safeFileName.pdf")
+
+                    val inputStream = getApplication<Application>().contentResolver.openInputStream(uri)
+                        ?: return@withContext
+
+                    inputStream.use { input ->
+                        destFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+
+                    val (pages, previewText) = pdfRagManager.extractFamilyPdfPreview(destFile)
+                    val newDoc = FamilyDocument(
+                        id = docId,
+                        title = title.trim().ifBlank { rawFileName.removeSuffix(".pdf") },
+                        docType = docType,
+                        memberName = memberName.trim().ifBlank { "Família" },
+                        fileName = rawFileName,
+                        filePath = destFile.absolutePath,
+                        pageCount = pages,
+                        extractedText = previewText,
+                        addedAtMillis = System.currentTimeMillis()
+                    )
+
+                    val updatedList = listOf(newDoc) + _familyDocuments.value
+                    saveFamilyDocumentsToDisk(updatedList)
+                    _familyDocuments.value = updatedList
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun deleteFamilyDocument(docId: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val target = _familyDocuments.value.find { it.id == docId }
+                if (target != null) {
+                    runCatching { File(target.filePath).delete() }
+                }
+                val updated = _familyDocuments.value.filterNot { it.id == docId }
+                saveFamilyDocumentsToDisk(updated)
+                _familyDocuments.value = updated
+            }
+        }
+    }
+
+    fun clearAllFamilyDocuments() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                _familyDocuments.value.forEach { doc ->
+                    runCatching { File(doc.filePath).delete() }
+                }
+                saveFamilyDocumentsToDisk(emptyList())
+                _familyDocuments.value = emptyList()
+            }
+        }
+    }
+
+    private fun loadFamilyDocumentsFromDisk(): List<FamilyDocument> {
+        if (!familyDocsMetaFile.exists()) return emptyList()
+        return try {
+            val jsonStr = familyDocsMetaFile.readText()
+            val arr = JSONArray(jsonStr)
+            val result = mutableListOf<FamilyDocument>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val filePath = obj.optString("filePath")
+                if (filePath.isNotBlank() && File(filePath).exists()) {
+                    result.add(
+                        FamilyDocument(
+                            id = obj.optString("id"),
+                            title = obj.optString("title"),
+                            docType = obj.optString("docType", "RECEITA_MEDICA"),
+                            memberName = obj.optString("memberName", "Família"),
+                            fileName = obj.optString("fileName", "documento.pdf"),
+                            filePath = filePath,
+                            pageCount = obj.optInt("pageCount", 1),
+                            extractedText = obj.optString("extractedText", ""),
+                            addedAtMillis = obj.optLong("addedAtMillis", System.currentTimeMillis())
+                        )
+                    )
+                }
+            }
+            result
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveFamilyDocumentsToDisk(docs: List<FamilyDocument>) {
+        try {
+            val arr = JSONArray()
+            docs.forEach { doc ->
+                val obj = JSONObject().apply {
+                    put("id", doc.id)
+                    put("title", doc.title)
+                    put("docType", doc.docType)
+                    put("memberName", doc.memberName)
+                    put("fileName", doc.fileName)
+                    put("filePath", doc.filePath)
+                    put("pageCount", doc.pageCount)
+                    put("extractedText", doc.extractedText)
+                    put("addedAtMillis", doc.addedAtMillis)
+                }
+                arr.put(obj)
+            }
+            familyDocsMetaFile.writeText(arr.toString())
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -414,7 +646,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateItemQuantity(itemId: Long, delta: Double) {
         viewModelScope.launch {
-            val item = uiState.value.items.find { it.id == itemId } ?: return@launch
+            val item = uiState.value.allRegisteredItems.find { it.id == itemId } ?: return@launch
             val newQty = (item.quantity + delta).coerceAtLeast(0.0)
             repository.updateQuantity(itemId, newQty)
         }
@@ -431,7 +663,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun rotateItem(itemId: Long, extendDays: Int = 180) {
         viewModelScope.launch {
-            val item = uiState.value.items.find { it.id == itemId } ?: return@launch
+            val item = uiState.value.allRegisteredItems.find { it.id == itemId } ?: return@launch
             val newExp = System.currentTimeMillis() + (extendDays.toLong() * 24 * 3600 * 1000)
             val updated = item.copy(expirationDate = newExp)
             repository.updateItem(updated)
@@ -440,7 +672,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateItemExpirationMonthYear(itemId: Long, month: Int, year: Int) {
         viewModelScope.launch {
-            val item = uiState.value.items.find { it.id == itemId } ?: return@launch
+            val item = uiState.value.allRegisteredItems.find { it.id == itemId } ?: return@launch
             val newExp = monthYearToExpirationTimestamp(month, year)
             repository.updateItem(item.copy(expirationDate = newExp))
         }
@@ -541,6 +773,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Atualiza os dados de um membro familiar já cadastrado.
+     */
+    fun updateProfile(
+        id: Long,
+        name: String,
+        role: FamilyRole,
+        weightKg: Double,
+        bloodType: String,
+        allergies: String,
+        medications: String
+    ) {
+        viewModelScope.launch {
+            repository.updateProfile(
+                FamilyProfileEntity(
+                    id = id,
+                    name = name.trim(),
+                    role = role,
+                    weightKg = weightKg,
+                    bloodType = bloodType.trim().ifBlank { "O+" },
+                    allergies = allergies.trim().ifBlank { "Nenhuma declarada" },
+                    medications = medications.trim().ifBlank { "Nenhuma de uso contínuo" }
+                )
+            )
+        }
+    }
+
     fun deleteProfile(profileId: Long) {
         viewModelScope.launch {
             repository.deleteProfileById(profileId)
@@ -597,12 +856,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.insertChunk(
                 ManualChunkFtsEntity(
                     docTitle = docTitle.trim(),
-                    category = category.trim().ifBlank { "GERAL" },
+                    category = category.trim().ifBlank { "GENERAL" },
                     pageNumber = pageNumber.coerceAtLeast(1),
                     contentText = contentText.trim()
                 )
             )
-            _pdfImportStatus.value = "✓ Manual/Protocolo \"${docTitle.trim()}\" criado e indexado offline!"
+            _pdfImportStatus.value = "✓ Protocolo \"${docTitle.trim()}\" adicionado à Base de Conhecimento da IA!"
         }
     }
 
@@ -614,21 +873,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearAllManualChunks() {
         viewModelScope.launch {
-            repository.clearAllManualChunks()
-            _ragResponse.value = null
-            _pdfImportStatus.value = "✓ Todos os manuais foram removidos."
+            repository.restoreOfficialKnowledgeBase()
+            _pdfImportStatus.value = "✓ Base Oficial de Sobrevivência (30 protocolos) restaurada."
         }
     }
 
     /**
-     * Limpa absolutamente todos os dados cadastrados/fictícios do app (Estoque, Família, Pontos do Mapa e Manuais)
-     * para o usuário começar 100% do zero com seus próprios dados.
+     * Limpa os dados fictícios (Estoque, Família, Pontos do Mapa),
+     * mantendo a Base Oficial de Sobrevivência para que o Chat IA continue pronto para uso.
      */
     fun clearAllFictionalData() {
         viewModelScope.launch {
             repository.clearAllDatabaseData()
             _ragResponse.value = null
-            _pdfImportStatus.value = "✓ Todos os dados fictícios foram apagados!"
+            _pdfImportStatus.value = "✓ Dados fictícios apagados! Base Oficial de Sobrevivência da IA mantida."
         }
     }
 

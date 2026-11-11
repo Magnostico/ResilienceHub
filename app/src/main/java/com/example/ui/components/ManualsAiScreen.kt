@@ -3,12 +3,18 @@ package com.example.ui.components
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -16,12 +22,35 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ui.ChatMessage
 import com.example.ui.MainUiState
 import com.example.ui.MainViewModel
+
+private data class QuickSurvivalPrompt(
+    val label: String,
+    val fullQuestion: String
+)
+
+private val OFFICIAL_QUICK_PROMPTS = listOf(
+    QuickSurvivalPrompt("⚠️ Guerra / Bombardeio", "Como proteger minha família durante um bombardeio, mísseis ou tiroteio?"),
+    QuickSurvivalPrompt("☢️ Ameaça Nuclear", "O que fazer nos primeiros 10 minutos de uma explosão nuclear e fallout radioativo?"),
+    QuickSurvivalPrompt("💧 Purificar Água", "Como purificar água com hipoclorito 2,5%, Clorin ou fervura?"),
+    QuickSurvivalPrompt("🩸 Hemorragia / Torniquete", "Como estancar sangramento grave e aplicar torniquete tático?"),
+    QuickSurvivalPrompt("👶 Engasgo Bebê / Adulto", "Como desengasgar um bebê menor de 1 ano e um adulto (Heimlich)?"),
+    QuickSurvivalPrompt("❤️ Parada Cardíaca (RCP)", "Como fazer massagem cardíaca RCP em adulto, criança e bebê?"),
+    QuickSurvivalPrompt("🥄 Soro Caseiro (OMS)", "Qual a receita exata do Soro Caseiro da OMS para diarreia e desidratação?"),
+    QuickSurvivalPrompt("🌊 Enchente / Deslizamento", "Como agir em enchente e quais os sinais de deslizamento de encosta?"),
+    QuickSurvivalPrompt("🪣 Banheiro Seco", "Como fazer um banheiro seco de emergência quando acaba a água e o esgoto?"),
+    QuickSurvivalPrompt("⚡ Apagão & Gaiola Faraday", "Como fazer uma Gaiola de Faraday contra EMP e agir em apagão elétrico?"),
+    QuickSurvivalPrompt("🐍 Cobras e Escorpiões", "O que fazer imediatamente em picada de cobra ou escorpião?"),
+    QuickSurvivalPrompt("🔥 Queimaduras / Incêndio", "Como tratar queimaduras graves e escapar de incêndio com fumaça?")
+)
 
 @Composable
 fun ManualsAiScreen(
@@ -31,15 +60,11 @@ fun ManualsAiScreen(
     modifier: Modifier = Modifier
 ) {
     val crisisMode = state.crisisMode
-    val quickTopics = listOf("Clorin", "Água", "Torniquete", "Bateria", "Evacuação", "Regra dos Três")
-    var ragQuestionInput by remember { mutableStateOf("") }
-    var showConfirmClearManuals by remember { mutableStateOf(false) }
-
-    val pdfPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri?.let { viewModel.importPdfFromUri(it) }
-    }
+    var chatInput by remember { mutableStateOf("") }
+    // true = Chat Conversacional IA (Padrão), false = Explorar Base Oficial Completa
+    var showChatView by remember { mutableStateOf(true) }
+    val listState = rememberLazyListState()
+    val focusManager = LocalFocusManager.current
 
     val modelPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -47,324 +72,316 @@ fun ManualsAiScreen(
         uri?.let { viewModel.importModelFromUri(it) }
     }
 
-    // Tela inteira unificada em um único LazyColumn para scroll fluido sem comprimir os resultados
-    LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 88.dp),
+    // Rola automaticamente para a última mensagem sempre que uma nova resposta chegar no Chat
+    LaunchedEffect(state.chatMessages.size, state.isRagLoading) {
+        if (showChatView && state.chatMessages.isNotEmpty()) {
+            listState.animateScrollToItem(state.chatMessages.size - 1)
+        }
+    }
+
+    Column(
         modifier = modifier
             .fillMaxSize()
             .testTag("manuals_ai_screen")
     ) {
-        // --- 1. AÇÕES DO TOPO: CRIAR MANUAL, IMPORTAR PDF, MODELO IA & SWITCH MODO IA LOCAL ---
-        item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
-                ),
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, Color(0xFF334155)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Button(
-                                onClick = onOpenAddManualDialog,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFF59E0B),
-                                    contentColor = Color(0xFF090D16)
-                                ),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                modifier = Modifier.testTag("btn_create_manual")
-                            ) {
-                                Icon(Icons.Default.NoteAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Novo Manual", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
-                            }
+        // --- 1. BARRA SUPERIOR DO CHAT DE SOBREVIVÊNCIA OFICIAL ---
+        Surface(
+            color = if (crisisMode) Color.Black else Color(0xFF111827),
+            border = BorderStroke(1.dp, Color(0xFF1E293B)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    // Alternador entre Chat IA e Base Oficial
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(
+                            selected = showChatView,
+                            onClick = { showChatView = true },
+                            label = {
+                                Text(
+                                    "💬 Chat IA Oficial",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (showChatView) Color(0xFF090D16) else Color.White
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFFFBBF24),
+                                containerColor = Color(0xFF1E293B)
+                            ),
+                            modifier = Modifier.testTag("tab_chat_view")
+                        )
 
-                            Button(
-                                onClick = { pdfPickerLauncher.launch("application/pdf") },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF0284C7),
-                                    contentColor = Color.White
-                                ),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                modifier = Modifier.testTag("btn_import_pdf")
-                            ) {
-                                Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("PDF", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-
-                            OutlinedButton(
-                                onClick = { modelPickerLauncher.launch("*/*") },
-                                border = BorderStroke(1.dp, Color(0xFFFBBF24)),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                                modifier = Modifier.testTag("btn_import_model")
-                            ) {
-                                Icon(Icons.Default.Memory, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(15.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(".task", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
-                            }
-                        }
-
-                        // Chave para ativar IA Local (MediaPipe LLM / RAG)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = if (state.ragModeAi) "IA Local" else "FTS",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (state.ragModeAi) Color(0xFFFBBF24) else Color(0xFF34D399)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Switch(
-                                checked = state.ragModeAi,
-                                onCheckedChange = { viewModel.setRagModeAi(it) },
-                                modifier = Modifier.testTag("switch_rag_mode")
-                            )
-                        }
+                        FilterChip(
+                            selected = !showChatView,
+                            onClick = { showChatView = false },
+                            label = {
+                                Text(
+                                    "📚 Base Oficial (${state.manualChunks.size})",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (!showChatView) Color(0xFF090D16) else Color(0xFFCBD5E1)
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF34D399),
+                                containerColor = Color(0xFF1E293B)
+                            ),
+                            modifier = Modifier.testTag("tab_knowledge_base_view")
+                        )
                     }
 
-                    // Status de importação
-                    state.pdfImportStatus?.let { status ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Surface(
-                            color = Color(0xFF0C2434),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, Color(0xFF38BDF8)),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = status,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color.White,
-                                modifier = Modifier.padding(10.dp)
-                            )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (showChatView && state.chatMessages.size > 1) {
+                            IconButton(
+                                onClick = { viewModel.clearChatHistory() },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = "Nova Conversa",
+                                    tint = Color(0xFFCBD5E1),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
+
+                        OutlinedButton(
+                            onClick = { modelPickerLauncher.launch("*/*") },
+                            border = BorderStroke(1.dp, Color(0xFF334155)),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .height(30.dp)
+                                .testTag("btn_import_model")
+                        ) {
+                            Icon(
+                                Icons.Default.Memory,
+                                contentDescription = null,
+                                tint = Color(0xFFFBBF24),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("LLM .task", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                        }
+                    }
+                }
+
+                // Selo de Órgãos Oficiais
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 2.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .background(Color(0xFF34D399), CircleShape)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "RAG 100% Offline: Defesa Civil • OMS • Ministério da Saúde • Cruz Vermelha (CICV) • FEMA • CNEN",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+
+                state.pdfImportStatus?.let { status ->
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        color = Color(0xFF0C2434),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = status,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                            modifier = Modifier.padding(8.dp)
+                        )
                     }
                 }
             }
         }
 
-        if (state.ragModeAi) {
-            // --- 2A. MODO IA LOCAL (RAG COM PROMPT ESTRITO EM TÓPICOS) ---
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
-                    ),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, Color(0xFFFBBF24)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.Psychology,
-                                contentDescription = null,
-                                tint = Color(0xFFFBBF24),
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Assistente de Emergência Civil Offline (RAG Local)",
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 14.sp,
-                                color = Color(0xFFFBBF24)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Responde com base nos seus manuais e PDFs cadastrados (Gemma 4 / Motor Extrativo Offline).",
-                            fontSize = 12.sp,
-                            color = Color(0xFFCBD5E1)
-                        )
+        if (showChatView) {
+            // =========================================================================
+            // VISÃO 1: CHAT CONVERSACIONAL DE SOBREVIVÊNCIA (PADRÃO)
+            // =========================================================================
+            LazyColumn(
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                items(state.chatMessages, key = { it.id }) { msg ->
+                    ChatMessageBubble(
+                        message = msg,
+                        crisisMode = crisisMode
+                    )
+                }
 
-                        Spacer(modifier = Modifier.height(10.dp))
-
+                if (state.isRagLoading) {
+                    item {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .padding(8.dp)
+                                .background(Color(0xFF111827), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
                         ) {
-                            OutlinedTextField(
-                                value = ragQuestionInput,
-                                onValueChange = { ragQuestionInput = it },
-                                placeholder = {
-                                    Text(
-                                        "Ex: Como purificar água com Clorin?",
-                                        fontSize = 12.sp,
-                                        color = Color(0xFF94A3B8)
-                                    )
-                                },
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color(0xFFFBBF24),
-                                    unfocusedBorderColor = Color(0xFF475569)
-                                ),
-                                singleLine = true,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("input_rag_question")
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = Color(0xFF34D399)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Button(
-                                onClick = { viewModel.askRagQuestion(ragQuestionInput) },
-                                enabled = ragQuestionInput.isNotBlank() && !state.isRagLoading,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFF59E0B),
-                                    contentColor = Color(0xFF090D16)
-                                ),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
-                                modifier = Modifier.testTag("btn_ask_rag")
-                            ) {
-                                if (state.isRagLoading) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(18.dp),
-                                        strokeWidth = 2.5.dp,
-                                        color = Color(0xFF090D16)
-                                    )
-                                } else {
-                                    Icon(Icons.Default.Send, contentDescription = "Consultar")
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        // Sugestões rápidas também no modo IA Local
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(quickTopics) { topic ->
-                                SuggestionChip(
-                                    onClick = {
-                                        ragQuestionInput = topic
-                                        viewModel.askRagQuestion(topic)
-                                    },
-                                    label = {
-                                        Text(
-                                            topic,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.White
-                                        )
-                                    },
-                                    colors = SuggestionChipDefaults.suggestionChipColors(
-                                        containerColor = Color(0xFF1E293B)
-                                    )
-                                )
-                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Consultando protocolos dos órgãos oficiais...",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF34D399)
+                            )
                         }
                     }
                 }
             }
 
-            // Resposta gerada pela IA Local com Alto Contraste
-            state.ragResponse?.let { rag ->
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (crisisMode) Color(0xFF03140D) else Color(0xFF062E22)
-                        ),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.5.dp, Color(0xFF34D399)),
+            // --- BARRA DE TEMAS RÁPIDOS DE EMERGÊNCIA + CAMPO DE MENSAGEM ---
+            Surface(
+                color = if (crisisMode) Color.Black else Color(0xFF0F172A),
+                border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                    Text(
+                        text = "Toque rápido em uma emergência ou digite sua pergunta:",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFFBBF24),
+                        modifier = Modifier.padding(bottom = 4.dp, start = 2.dp)
+                    )
+
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    ) {
+                        items(OFFICIAL_QUICK_PROMPTS) { prompt ->
+                            SuggestionChip(
+                                onClick = {
+                                    viewModel.askRagQuestion(prompt.fullQuestion)
+                                    focusManager.clearFocus()
+                                },
+                                label = {
+                                    Text(
+                                        text = prompt.label,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                },
+                                colors = SuggestionChipDefaults.suggestionChipColors(
+                                    containerColor = Color(0xFF1E293B)
+                                ),
+                                border = SuggestionChipDefaults.suggestionChipBorder(
+                                    enabled = true,
+                                    borderColor = Color(0xFF334155)
+                                )
+                            )
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
+                        OutlinedTextField(
+                            value = chatInput,
+                            onValueChange = { chatInput = it },
+                            placeholder = {
                                 Text(
-                                    text = "Diretriz Oficial Sintetizada:",
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 14.sp,
-                                    color = Color(0xFF34D399)
+                                    "Pergunte à IA (ex: como agir em bombardeio, purificar água...)",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF94A3B8)
                                 )
-                                Surface(
-                                    color = Color(0xFF090D16),
-                                    shape = RoundedCornerShape(6.dp),
-                                    border = BorderStroke(1.dp, Color(0xFF34D399))
-                                ) {
-                                    Text(
-                                        text = rag.executionMode,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF34D399),
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            Text(
-                                text = rag.answer,
-                                fontSize = 13.sp,
-                                lineHeight = 20.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = Color.White
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Text(
-                                text = "Auditoria Visual (Fontes Utilizadas):",
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 12.sp,
-                                color = Color(0xFFFBBF24)
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-
-                            rag.citedSources.forEach { s ->
-                                Surface(
-                                    color = Color(0xFF090D16),
-                                    shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(1.dp, Color(0xFF1E293B)),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                ) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Text(
-                                            text = "📄 ${s.docTitle} (Página ${s.pageNumber} • ${s.category}):",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color(0xFF38BDF8)
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = "\"${s.contentText}\"",
-                                            fontSize = 11.sp,
-                                            lineHeight = 16.sp,
-                                            color = Color(0xFFE2E8F0)
-                                        )
+                            },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = Color(0xFFFBBF24),
+                                unfocusedBorderColor = Color(0xFF475569),
+                                focusedContainerColor = Color(0xFF090D16),
+                                unfocusedContainerColor = Color(0xFF090D16)
+                            ),
+                            shape = RoundedCornerShape(22.dp),
+                            maxLines = 3,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(
+                                onSend = {
+                                    if (chatInput.isNotBlank() && !state.isRagLoading) {
+                                        viewModel.askRagQuestion(chatInput)
+                                        chatInput = ""
+                                        focusManager.clearFocus()
                                     }
                                 }
-                            }
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("input_rag_question")
+                        )
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        FloatingActionButton(
+                            onClick = {
+                                if (chatInput.isNotBlank() && !state.isRagLoading) {
+                                    viewModel.askRagQuestion(chatInput)
+                                    chatInput = ""
+                                    focusManager.clearFocus()
+                                }
+                            },
+                            containerColor = if (chatInput.isNotBlank()) Color(0xFFF59E0B) else Color(0xFF334155),
+                            contentColor = if (chatInput.isNotBlank()) Color(0xFF090D16) else Color(0xFF94A3B8),
+                            shape = CircleShape,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("btn_ask_rag")
+                        ) {
+                            Icon(
+                                Icons.Default.Send,
+                                contentDescription = "Enviar Mensagem"
+                            )
                         }
                     }
                 }
             }
         } else {
-            // --- 2B. MODO RÁPIDO (FTS4 ZERO BATERIA) ---
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // =========================================================================
+            // VISÃO 2: CATÁLOGO COMPLETO DA BASE OFICIAL DOS ÓRGÃOS OFICIAIS
+            // =========================================================================
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 88.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                item {
                     OutlinedTextField(
                         value = state.manualQuery,
                         onValueChange = { viewModel.setManualQuery(it) },
                         label = {
                             Text(
-                                "Pesquisa Rápida FTS4 (Zero Consumo)",
+                                "Filtrar nas ${state.manualChunks.size} diretrizes oficiais...",
                                 color = Color(0xFFCBD5E1)
                             )
                         },
@@ -389,128 +406,61 @@ fun ManualsAiScreen(
                             .fillMaxWidth()
                             .testTag("input_fts_search")
                     )
+                }
 
-                    // Chips rápidos de termos frequentes
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                item {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        items(quickTopics) { topic ->
-                            SuggestionChip(
-                                onClick = { viewModel.setManualQuery(topic) },
-                                label = {
-                                    Text(
-                                        topic,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White
-                                    )
-                                },
-                                icon = {
-                                    Icon(
-                                        Icons.Default.BookmarkBorder,
-                                        contentDescription = null,
-                                        tint = Color(0xFFFBBF24),
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                },
-                                colors = SuggestionChipDefaults.suggestionChipColors(
-                                    containerColor = Color(0xFF1E293B)
-                                )
-                            )
+                        Text(
+                            text = "${state.manualChunks.size} diretrizes oficiais indexadas no RAG:",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF34D399)
+                        )
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TextButton(
+                                onClick = onOpenAddManualDialog,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Icon(Icons.Default.NoteAdd, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("+ Nota Familiar", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                            }
+
+                            TextButton(
+                                onClick = { viewModel.restoreOfficialKnowledgeBase() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Icon(Icons.Default.Restore, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Restaurar Base", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        // --- 3. CABEÇALHO E BOTÃO DE LIMPAR MANUAIS ---
-        item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "${state.manualChunks.size} protocolo(s) / manual(is) cadastrado(s):",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = Color.White
-                )
-
-                if (state.manualChunks.isNotEmpty()) {
-                    TextButton(
-                        onClick = { showConfirmClearManuals = true },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                items(state.manualChunks, key = { it.rowId }) { chunk ->
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (crisisMode) Color(0xFF3F3F46) else Color(0xFF334155)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = Color(0xFFF87171), modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Limpar Manuais", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
-                    }
-                }
-            }
-        }
-
-        if (state.manualChunks.isEmpty()) {
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, Color(0xFF334155)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(24.dp)
-                    ) {
-                        Text(
-                            text = "Nenhum manual ou protocolo cadastrado.",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Crie seu próprio manual/protocolo ou importe um arquivo PDF.",
-                            color = Color(0xFFCBD5E1),
-                            fontSize = 12.sp
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(
-                            onClick = onOpenAddManualDialog,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFF59E0B),
-                                contentColor = Color(0xFF090D16)
-                            )
-                        ) {
-                            Icon(Icons.Default.NoteAdd, contentDescription = null)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Criar Meu Primeiro Manual", fontWeight = FontWeight.ExtraBold)
-                        }
-                    }
-                }
-            }
-        } else {
-            items(state.manualChunks, key = { it.rowId }) { chunk ->
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
-                    ),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(
-                        1.dp,
-                        if (crisisMode) Color(0xFF3F3F46) else Color(0xFF334155)
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
                                 Surface(
                                     color = Color(0xFF0F2942),
                                     shape = RoundedCornerShape(6.dp),
@@ -524,58 +474,177 @@ fun ManualsAiScreen(
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                     )
                                 }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Pág. ${chunk.pageNumber}",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFFFBBF24)
-                                )
+
+                                TextButton(
+                                    onClick = {
+                                        showChatView = true
+                                        viewModel.askRagQuestion(chunk.docTitle)
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text(
+                                        "Perguntar no Chat →",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFFBBF24)
+                                    )
+                                }
                             }
 
-                            IconButton(
-                                onClick = { viewModel.deleteManualChunk(chunk.rowId) },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.DeleteOutline,
-                                    contentDescription = "Apagar Manual",
-                                    tint = Color(0xFFF87171),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Text(
+                                text = chunk.docTitle,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.sp,
+                                color = Color.White
+                            )
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Text(
+                                text = chunk.contentText,
+                                fontSize = 12.sp,
+                                lineHeight = 18.sp,
+                                color = Color(0xFFE2E8F0)
+                            )
                         }
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        Text(
-                            text = chunk.docTitle,
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 14.sp,
-                            color = Color.White
-                        )
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        Text(
-                            text = chunk.contentText,
-                            fontSize = 13.sp,
-                            lineHeight = 19.sp,
-                            color = Color(0xFFE2E8F0)
-                        )
                     }
                 }
             }
         }
     }
+}
 
-    if (showConfirmClearManuals) {
-        ConfirmClearDialog(
-            title = "Apagar Todos os Manuais?",
-            message = "Todos os manuais e trechos fictícios serão apagados. Você poderá criar seus próprios protocolos ou importar novos PDFs.",
-            confirmButtonText = "Apagar Manuais",
-            onDismiss = { showConfirmClearManuals = false },
-            onConfirm = { viewModel.clearAllManualChunks() }
-        )
+@Composable
+private fun ChatMessageBubble(
+    message: ChatMessage,
+    crisisMode: Boolean
+) {
+    var showSources by remember { mutableStateOf(false) }
+
+    Column(
+        horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Surface(
+            color = when {
+                message.isUser -> Color(0xFFF59E0B)
+                crisisMode -> Color(0xFF051811)
+                else -> Color(0xFF111827)
+            },
+            shape = RoundedCornerShape(
+                topStart = 16.dp,
+                topEnd = 16.dp,
+                bottomStart = if (message.isUser) 16.dp else 4.dp,
+                bottomEnd = if (message.isUser) 4.dp else 16.dp
+            ),
+            border = BorderStroke(
+                1.dp,
+                if (message.isUser) Color(0xFFFBBF24) else Color(0xFF10B981)
+            ),
+            modifier = Modifier.widthIn(max = 340.dp)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                // Cabeçalho do balão
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (message.isUser) Icons.Default.Person else Icons.Default.Shield,
+                            contentDescription = null,
+                            tint = if (message.isUser) Color(0xFF090D16) else Color(0xFF34D399),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = if (message.isUser) "Você" else "IA Defesa Civil & Sobrevivência",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (message.isUser) Color(0xFF090D16) else Color(0xFF34D399)
+                        )
+                    }
+
+                    Text(
+                        text = message.timestamp,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (message.isUser) Color(0xFF1E293B) else Color(0xFF94A3B8)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Texto da mensagem
+                Text(
+                    text = message.text.replace("**", ""),
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    fontWeight = if (message.isUser) FontWeight.Bold else FontWeight.Medium,
+                    color = if (message.isUser) Color(0xFF090D16) else Color.White
+                )
+
+                // Fontes oficiais consultadas pelo RAG
+                if (!message.isUser && message.citedSources.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Divider(color = Color(0xFF1E293B))
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    TextButton(
+                        onClick = { showSources = !showSources },
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                    ) {
+                        Icon(
+                            if (showSources) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = null,
+                            tint = Color(0xFFFBBF24),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (showSources)
+                                "Ocultar Fontes Oficiais (${message.citedSources.size})"
+                            else
+                                "Ver Fontes Oficiais Utilizadas (${message.citedSources.size})",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFFFBBF24)
+                        )
+                    }
+
+                    AnimatedVisibility(visible = showSources) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            message.citedSources.forEach { source ->
+                                Surface(
+                                    color = Color(0xFF090D16),
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(8.dp)) {
+                                        Text(
+                                            text = "📄 ${source.docTitle} (${source.category})",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color(0xFF38BDF8)
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = source.contentText,
+                                            fontSize = 10.sp,
+                                            lineHeight = 14.sp,
+                                            color = Color(0xFFCBD5E1)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
