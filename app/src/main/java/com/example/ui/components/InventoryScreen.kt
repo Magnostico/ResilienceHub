@@ -3,6 +3,7 @@ package com.example.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -44,6 +45,7 @@ fun InventoryScreen(
     var showBarcodeScannerModal by remember { mutableStateOf(false) }
     var activeBarcodeFilter by remember { mutableStateOf<String?>(null) }
     var itemToEditExpiration by remember { mutableStateOf<InventoryItemEntity?>(null) }
+    var itemToEditFull by remember { mutableStateOf<InventoryItemEntity?>(null) }
     var showConfirmClearAllItems by remember { mutableStateOf(false) }
 
     val displayedItems = remember(state.evaluatedItems, activeBarcodeFilter) {
@@ -497,6 +499,7 @@ fun InventoryScreen(
                     onAddQty = { viewModel.updateItemQuantity(eval.item.id, 1.0) },
                     onRemoveQty = { viewModel.updateItemQuantity(eval.item.id, -1.0) },
                     onEditExpirationMonthYear = { itemToEditExpiration = eval.item },
+                    onEditItemFull = { itemToEditFull = eval.item },
                     onRegisterMaintenance = { viewModel.registerBatteryMaintenance(eval.item.id) },
                     onDeleteItem = { viewModel.deleteItem(eval.item.id) }
                 )
@@ -524,6 +527,27 @@ fun InventoryScreen(
         )
     }
 
+    itemToEditFull?.let { targetItem ->
+        EditInventoryItemDialog(
+            item = targetItem,
+            onDismiss = { itemToEditFull = null },
+            onConfirm = { name, barcode, category, location, qty, unit, expMonth, expYear, resetBattery ->
+                viewModel.updateInventoryItem(
+                    itemId = targetItem.id,
+                    name = name,
+                    barcode = barcode,
+                    category = category,
+                    location = location,
+                    quantity = qty,
+                    unit = unit,
+                    expirationMonth = expMonth,
+                    expirationYear = expYear,
+                    resetBatteryMaintenanceNow = resetBattery
+                )
+            }
+        )
+    }
+
     if (showConfirmClearAllItems) {
         ConfirmClearDialog(
             title = "Limpar Todo o Estoque?",
@@ -542,6 +566,7 @@ fun InventoryItemCard(
     onAddQty: () -> Unit,
     onRemoveQty: () -> Unit,
     onEditExpirationMonthYear: () -> Unit,
+    onEditItemFull: () -> Unit = {},
     onRegisterMaintenance: () -> Unit,
     onDeleteItem: () -> Unit
 ) {
@@ -577,7 +602,7 @@ fun InventoryItemCard(
             .testTag("inventory_item_${item.id}")
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Header: Category, Location, Status Badge & Delete Button
+            // Header: Category (clicável para editar), Location, Status Badge, Edit & Delete Buttons
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -585,7 +610,9 @@ fun InventoryItemCard(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onEditItemFull() }
                 ) {
                     Icon(
                         if (item.location == StorageLocation.APARTMENT) Icons.Default.Home else Icons.Default.Backpack,
@@ -599,6 +626,13 @@ fun InventoryItemCard(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFFBBF24)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = "Editar Categoria",
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(13.dp)
                     )
                 }
 
@@ -617,7 +651,21 @@ fun InventoryItemCard(
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    IconButton(
+                        onClick = onEditItemFull,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .testTag("btn_edit_item_${item.id}")
+                    ) {
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = "Editar Produto e Categoria",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
 
                     IconButton(
                         onClick = onDeleteItem,
@@ -679,15 +727,36 @@ fun InventoryItemCard(
                 }
             }
 
-            // Alert message if not OK
-            if (status != ItemAlertStatus.OK) {
-                Text(
-                    text = eval.alertMessage,
-                    fontSize = 12.sp,
-                    color = statusTextColor,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(top = 5.dp)
-                )
+            // Aviso automático baseado no Protocolo de Sobrevivência da Categoria
+            Surface(
+                color = if (status != ItemAlertStatus.OK) statusBgColor else Color(0xFF090D16),
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(
+                    width = 1.dp,
+                    color = if (status != ItemAlertStatus.OK) statusTextColor else Color(0xFF1E293B)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                    Text(
+                        text = eval.alertMessage,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        color = if (status != ItemAlertStatus.OK) statusTextColor else Color(0xFF34D399),
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (eval.protocolRuleSummary.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = eval.protocolRuleSummary,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                }
             }
 
             // Exibição da Validade em Mês/Ano (MM/yyyy) e Manutenção
@@ -734,8 +803,20 @@ fun InventoryItemCard(
                     }
                 }
 
-                // Action buttons: "Mês/Ano" (Girar/Editar Validade) ou "Recarregar"
+                // Action buttons: "Categoria", "Mês/Ano" (Girar/Editar Validade) ou "Recarregar"
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(
+                        onClick = onEditItemFull,
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Icon(Icons.Default.Category, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Categoria", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
+                    }
+
                     if (item.category == ItemCategory.ENERGY_GEAR) {
                         Button(
                             onClick = onRegisterMaintenance,

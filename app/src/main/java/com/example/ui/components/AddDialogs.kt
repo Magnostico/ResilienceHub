@@ -67,6 +67,19 @@ private val MONTH_OPTIONS = listOf(
 
 private val YEAR_OPTIONS = (2026..2035).toList()
 
+private fun getCategoryProtocolBannerText(category: ItemCategory): String = when (category) {
+    ItemCategory.WATER ->
+        "🛡️ Protocolo Automático OMS/Defesa Civil (Água): Monitora giro FEFO aos 90d/30d, cálculo de autonomia hídrica (2,5L/d apto e 2L/d mochila) e alerta de fervura/cloração se vencer."
+    ItemCategory.FOOD ->
+        "🛡️ Protocolo Automático FEMA/ANVISA (Alimentos): Monitora giro alimentar 90d/30d e emite alerta de inspeção contra estufamento/botulismo ao vencer."
+    ItemCategory.MEDS ->
+        "🛡️ Protocolo Automático Min. Saúde/Cruz Vermelha (Farmácia): Monitora reposição preventiva 90d/30d e bloqueia uso de medicamentos com princípio ativo expirado."
+    ItemCategory.ENERGY_GEAR ->
+        "🛡️ Protocolo Automático FEMA/Bombeiros (Energia): Dispara aviso automático de teste e recarga obrigatória de bateria a cada 90 dias."
+    ItemCategory.HYGIENE_DOCS ->
+        "🛡️ Protocolo Automático Defesa Civil/OMS (Higiene & Docs): Monitora renovação documental e validade de químicos sanitários (cloro/álcool 70%)."
+}
+
 private fun normalizeForSearch(input: String): String {
     val nfd = Normalizer.normalize(input.lowercase(Locale.getDefault()), Normalizer.Form.NFD)
     return Regex("\\p{InCombiningDiacriticalMarks}+").replace(nfd, "").trim()
@@ -511,7 +524,7 @@ fun AddItemDialog(
                 }
 
                 // Category selector
-                Text("Categoria:", style = MaterialTheme.typography.labelMedium, color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
+                Text("Categoria (Define o Protocolo de Alerta Automático):", style = MaterialTheme.typography.labelMedium, color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(ItemCategory.values()) { cat ->
                         val isSel = selectedCategory == cat
@@ -554,6 +567,22 @@ fun AddItemDialog(
                             )
                         )
                     }
+                }
+
+                // Aviso do protocolo automático vinculado à categoria
+                Surface(
+                    color = Color(0xFF0C2434),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = getCategoryProtocolBannerText(selectedCategory),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        color = Color(0xFFE0F2FE),
+                        modifier = Modifier.padding(8.dp)
+                    )
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -757,6 +786,291 @@ fun AddItemDialog(
             }
         )
     }
+}
+
+/**
+ * Modal completo para Editar um Produto já cadastrado (incluindo sua CATEGORIA, Local, Nome,
+ * Código EAN, Quantidade, Unidade e Validade Mês/Ano), aplicando automaticamente os
+ * protocolos de sobrevivência e avisos da categoria escolhida.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun EditInventoryItemDialog(
+    item: InventoryItemEntity,
+    onDismiss: () -> Unit,
+    onConfirm: (
+        name: String,
+        barcode: String?,
+        category: ItemCategory,
+        location: StorageLocation,
+        quantity: Double,
+        unit: String,
+        expirationMonth: Int?,
+        expirationYear: Int?,
+        resetBatteryMaintenanceNow: Boolean
+    ) -> Unit
+) {
+    val initCal = remember(item.expirationDate) {
+        Calendar.getInstance().apply {
+            if (item.expirationDate != null) {
+                timeInMillis = item.expirationDate
+            } else {
+                add(Calendar.MONTH, 6)
+            }
+        }
+    }
+
+    var name by remember { mutableStateOf(item.name) }
+    var barcode by remember { mutableStateOf(item.barcode ?: "") }
+    var selectedCategory by remember { mutableStateOf(item.category) }
+    var selectedLocation by remember { mutableStateOf(item.location) }
+    var quantityText by remember {
+        mutableStateOf(
+            if (item.quantity % 1.0 == 0.0) item.quantity.toInt().toString()
+            else String.format(Locale.US, "%.1f", item.quantity)
+        )
+    }
+    var unitText by remember { mutableStateOf(item.unit) }
+    var hasExpiration by remember { mutableStateOf(item.expirationDate != null) }
+    var monthText by remember { mutableStateOf(String.format(Locale.US, "%02d", initCal.get(Calendar.MONTH) + 1)) }
+    var yearText by remember { mutableStateOf(initCal.get(Calendar.YEAR).toString()) }
+    var resetBatteryMaintenanceNow by remember { mutableStateOf(false) }
+
+    val textFieldColors = OutlinedTextFieldDefaults.colors(
+        focusedTextColor = Color.White,
+        unfocusedTextColor = Color.White,
+        focusedBorderColor = Color(0xFFFBBF24),
+        unfocusedBorderColor = Color(0xFF475569)
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        title = { Text("Editar Produto & Categoria", fontWeight = FontWeight.ExtraBold) },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                // Seletor de Categoria em destaque no topo para facilitar a troca de categoria
+                Text(
+                    text = "Categoria do Produto (Ajusta Avisos Automaticamente):",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color(0xFFFBBF24)
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(ItemCategory.values()) { cat ->
+                        val isSel = selectedCategory == cat
+                        FilterChip(
+                            selected = isSel,
+                            onClick = {
+                                selectedCategory = cat
+                                if (cat == ItemCategory.ENERGY_GEAR && item.expirationDate == null) {
+                                    hasExpiration = false
+                                } else if (cat != ItemCategory.ENERGY_GEAR && !hasExpiration) {
+                                    hasExpiration = true
+                                }
+                            },
+                            label = {
+                                Text(
+                                    cat.displayName,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (isSel) Color.White else Color(0xFFCBD5E1)
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF0284C7),
+                                containerColor = Color(0xFF1E293B)
+                            )
+                        )
+                    }
+                }
+
+                // Banner mostrando a regra de sobrevivência que entra em vigor automaticamente
+                Surface(
+                    color = Color(0xFF0C2434),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = getCategoryProtocolBannerText(selectedCategory),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        color = Color(0xFFE0F2FE),
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+
+                if (selectedCategory == ItemCategory.ENERGY_GEAR) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Registrar carga/teste de bateria hoje (ciclo 90d):",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF34D399),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = resetBatteryMaintenanceNow,
+                            onCheckedChange = { resetBatteryMaintenanceNow = it }
+                        )
+                    }
+                }
+
+                // Local de Armazenamento
+                Text("Local de Armazenamento:", fontSize = 12.sp, color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StorageLocation.values().forEach { loc ->
+                        val isSel = selectedLocation == loc
+                        FilterChip(
+                            selected = isSel,
+                            onClick = { selectedLocation = loc },
+                            label = {
+                                Text(
+                                    if (loc == StorageLocation.APARTMENT) "Apartamento" else "Mochila 72h",
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSel) Color(0xFF090D16) else Color.White
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFFFBBF24),
+                                containerColor = Color(0xFF1E293B)
+                            )
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Nome do Produto", color = Color(0xFFCBD5E1)) },
+                    colors = textFieldColors,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = barcode,
+                    onValueChange = { barcode = it },
+                    label = { Text("Código EAN-13 (Opcional)", color = Color(0xFFCBD5E1)) },
+                    colors = textFieldColors,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = quantityText,
+                        onValueChange = { quantityText = it },
+                        label = { Text("Quantidade", color = Color(0xFFCBD5E1)) },
+                        colors = textFieldColors,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = unitText,
+                        onValueChange = { unitText = it },
+                        label = { Text("Unidade", color = Color(0xFFCBD5E1)) },
+                        colors = textFieldColors,
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // Validade Mês e Ano
+                Surface(
+                    color = Color(0xFF090D16),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, Color(0xFF334155)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Possui Data de Validade (MM/AAAA)?",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFFFBBF24)
+                            )
+                            Switch(
+                                checked = hasExpiration,
+                                onCheckedChange = { hasExpiration = it }
+                            )
+                        }
+
+                        if (hasExpiration) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = monthText,
+                                    onValueChange = { if (it.length <= 2 && it.all { c -> c.isDigit() }) monthText = it },
+                                    label = { Text("Mês (01-12)", color = Color(0xFFCBD5E1)) },
+                                    colors = textFieldColors,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = yearText,
+                                    onValueChange = { if (it.length <= 4 && it.all { c -> c.isDigit() }) yearText = it },
+                                    label = { Text("Ano (AAAA)", color = Color(0xFFCBD5E1)) },
+                                    colors = textFieldColors,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val qty = quantityText.replace(",", ".").toDoubleOrNull() ?: item.quantity
+                    val expM = if (hasExpiration) monthText.toIntOrNull()?.coerceIn(1, 12) else null
+                    val expY = if (hasExpiration) yearText.toIntOrNull()?.coerceIn(2020, 2100) else null
+                    onConfirm(
+                        name,
+                        barcode.ifBlank { null },
+                        selectedCategory,
+                        selectedLocation,
+                        qty,
+                        unitText,
+                        expM,
+                        expY,
+                        resetBatteryMaintenanceNow
+                    )
+                    onDismiss()
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFF59E0B),
+                    contentColor = Color(0xFF090D16)
+                )
+            ) {
+                Text("Salvar Alterações", fontWeight = FontWeight.ExtraBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar", color = Color(0xFFCBD5E1))
+            }
+        }
+    )
 }
 
 /**

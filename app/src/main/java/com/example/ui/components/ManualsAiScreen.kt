@@ -52,6 +52,16 @@ private val OFFICIAL_QUICK_PROMPTS = listOf(
     QuickSurvivalPrompt("🔥 Queimaduras / Incêndio", "Como tratar queimaduras graves e escapar de incêndio com fumaça?")
 )
 
+private val EDGE_GALLERY_FREE_PROMPTS = listOf(
+    QuickSurvivalPrompt("🍞 Receita Pão Caseiro", "Como fazer uma receita de pão caseiro fácil na frigideira ou forno?"),
+    QuickSurvivalPrompt("🔋 Cálculo Bateria (Wh)", "Como calcular quantos Watts e horas dura uma bateria ou painel solar?"),
+    QuickSurvivalPrompt("🌌 Orientação Estrelas", "Como achar o Sul verdadeiro pelo Cruzeiro do Sul e os planetas do Sistema Solar?"),
+    QuickSurvivalPrompt("🚗 Mecânica: Chupeta", "Como fazer partida auxiliar (chupeta) na bateria do carro com segurança?"),
+    QuickSurvivalPrompt("🧮 Conta: 18% de 450", "Quanto é 18% de 450?"),
+    QuickSurvivalPrompt("🎲 Jogos sem Internet", "Sugira jogos e passatempos em família que não gastam bateria nem internet"),
+    QuickSurvivalPrompt("🤖 Como funciona IA Edge", "Como funcionam os modelos locais Gemma .task no Google AI Edge Gallery?")
+)
+
 @Composable
 fun ManualsAiScreen(
     state: MainUiState,
@@ -63,6 +73,7 @@ fun ManualsAiScreen(
     var chatInput by remember { mutableStateOf("") }
     // true = Chat Conversacional IA (Padrão), false = Explorar Base Oficial Completa
     var showChatView by remember { mutableStateOf(true) }
+    var showEdgeModelDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val focusManager = LocalFocusManager.current
 
@@ -154,8 +165,8 @@ fun ManualsAiScreen(
                         }
 
                         OutlinedButton(
-                            onClick = { modelPickerLauncher.launch("*/*") },
-                            border = BorderStroke(1.dp, Color(0xFF334155)),
+                            onClick = { showEdgeModelDialog = true },
+                            border = BorderStroke(1.dp, Color(0xFFA855F7)),
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             modifier = Modifier
@@ -165,28 +176,119 @@ fun ManualsAiScreen(
                             Icon(
                                 Icons.Default.Memory,
                                 contentDescription = null,
-                                tint = Color(0xFFFBBF24),
+                                tint = Color(0xFFC084FC),
                                 modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("LLM .task", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                            Text("Modelo Edge", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFC084FC))
                         }
                     }
                 }
 
-                // Selo de Órgãos Oficiais
+                // --- SELETOR DE MODO DA IA LOCAL: MODO RAG vs CHAT LIVRE (ESTILO GOOGLE AI EDGE GALLERY) ---
+                if (showChatView) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val isRag = state.ragModeAi
+                        Surface(
+                            onClick = { viewModel.setRagModeAi(true) },
+                            color = if (isRag) Color(0xFF062E22) else Color(0xFF0F172A),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(
+                                width = if (isRag) 1.5.dp else 1.dp,
+                                color = if (isRag) Color(0xFF34D399) else Color(0xFF334155)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("mode_selector_rag")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Shield,
+                                    contentDescription = null,
+                                    tint = if (isRag) Color(0xFF34D399) else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        text = "Modo RAG (Oficial)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (isRag) Color(0xFF34D399) else Color.White
+                                    )
+                                    Text(
+                                        text = "Protocolos + Seu Estoque",
+                                        fontSize = 9.sp,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                            }
+                        }
+
+                        Surface(
+                            onClick = { viewModel.setRagModeAi(false) },
+                            color = if (!isRag) Color(0xFF2E1065) else Color(0xFF0F172A),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(
+                                width = if (!isRag) 1.5.dp else 1.dp,
+                                color = if (!isRag) Color(0xFFA855F7) else Color(0xFF334155)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("mode_selector_free_edge")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = if (!isRag) Color(0xFFC084FC) else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        text = "Chat Livre (Edge Gallery)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (!isRag) Color(0xFFC084FC) else Color.White
+                                    )
+                                    Text(
+                                        text = "Conversa Aberta 100% Offline",
+                                        fontSize = 9.sp,
+                                        color = Color(0xFFCBD5E1)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Selo de Status Offline
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(top = 2.dp)
+                    modifier = Modifier.padding(top = 5.dp)
                 ) {
                     Box(
                         modifier = Modifier
                             .size(7.dp)
-                            .background(Color(0xFF34D399), CircleShape)
+                            .background(if (state.ragModeAi) Color(0xFF34D399) else Color(0xFFC084FC), CircleShape)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "RAG 100% Offline: Defesa Civil • OMS • Ministério da Saúde • Cruz Vermelha (CICV) • FEMA • CNEN",
+                        text = if (state.ragModeAi)
+                            "100% Offline • RAG Ativo: Defesa Civil • OMS • Min. Saúde • Cruz Vermelha • FEMA"
+                        else
+                            "100% Offline • Modo Google AI Edge Gallery: Converse livremente sobre qualquer assunto",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color(0xFF94A3B8)
@@ -261,7 +363,8 @@ fun ManualsAiScreen(
                 }
             }
 
-            // --- BARRA DE TEMAS RÁPIDOS DE EMERGÊNCIA + CAMPO DE MENSAGEM ---
+            // --- BARRA DE TEMAS RÁPIDOS + CAMPO DE MENSAGEM ---
+            val activeQuickPrompts = if (state.ragModeAi) OFFICIAL_QUICK_PROMPTS else EDGE_GALLERY_FREE_PROMPTS
             Surface(
                 color = if (crisisMode) Color.Black else Color(0xFF0F172A),
                 border = BorderStroke(1.dp, Color(0xFF1E293B)),
@@ -269,10 +372,13 @@ fun ManualsAiScreen(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
                     Text(
-                        text = "Toque rápido em uma emergência ou digite sua pergunta:",
+                        text = if (state.ragModeAi)
+                            "Toque rápido em uma emergência (Modo RAG) ou digite sua pergunta:"
+                        else
+                            "Sugestões de Chat Livre (Estilo Edge Gallery 100% Offline):",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFFFBBF24),
+                        color = if (state.ragModeAi) Color(0xFFFBBF24) else Color(0xFFC084FC),
                         modifier = Modifier.padding(bottom = 4.dp, start = 2.dp)
                     )
 
@@ -280,7 +386,7 @@ fun ManualsAiScreen(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.padding(bottom = 8.dp)
                     ) {
-                        items(OFFICIAL_QUICK_PROMPTS) { prompt ->
+                        items(activeQuickPrompts) { prompt ->
                             SuggestionChip(
                                 onClick = {
                                     viewModel.askRagQuestion(prompt.fullQuestion)
@@ -314,7 +420,10 @@ fun ManualsAiScreen(
                             onValueChange = { chatInput = it },
                             placeholder = {
                                 Text(
-                                    "Pergunte à IA (ex: como agir em bombardeio, purificar água...)",
+                                    if (state.ragModeAi)
+                                        "Pergunte no Modo RAG (ex: purificar água, meu estoque...)"
+                                    else
+                                        "Converse livremente 100% offline (ciência, receitas, contas...)",
                                     fontSize = 12.sp,
                                     color = Color(0xFF94A3B8)
                                 )
@@ -516,6 +625,77 @@ fun ManualsAiScreen(
                 }
             }
         }
+    }
+
+    if (showEdgeModelDialog) {
+        AlertDialog(
+            onDismissRequest = { showEdgeModelDialog = false },
+            containerColor = Color(0xFF111827),
+            titleContentColor = Color.White,
+            textContentColor = Color.White,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Memory, contentDescription = null, tint = Color(0xFFC084FC))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Motor IA Local (Edge Gallery)", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Surface(
+                        color = Color(0xFF090D16),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Color(0xFF34D399)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                text = "✓ Status do Motor 100% Offline:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF34D399)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = viewModel.getLocalModelStatusText(),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "• O app já conta com um Motor Cognitivo & Enciclopédico 100% Offline nativo embutido para responder tanto no Modo RAG quanto no Modo Chat Livre sem precisar de internet.\n" +
+                            "• Se você tiver um arquivo de modelo do Google AI Edge Gallery (.task, .litertlm ou .bin, como Gemma-2B-IT ou Gemma-3-1B) no celular, pode carregá-lo abaixo para inferência neural direta via MediaPipe!",
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+
+                    Button(
+                        onClick = {
+                            showEdgeModelDialog = false
+                            modelPickerLauncher.launch("*/*")
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFA855F7),
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(17.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Importar Arquivo .task / .litertlm / .bin", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showEdgeModelDialog = false }) {
+                    Text("Fechar", color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
+                }
+            }
+        )
     }
 }
 

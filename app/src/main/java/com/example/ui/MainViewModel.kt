@@ -485,7 +485,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setRagModeAi(enabled: Boolean) {
         _ragModeAi.value = enabled
+        pendingFreeTopicQuestion = null
     }
+
+    fun getLocalModelStatusText(): String = pdfRagManager.getActiveLocalModelDescription()
 
     // --- Hardware Tools Controls ---
 
@@ -581,16 +584,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Constrói pares (Pergunta do Usuário -> Resposta da IA) das últimas mensagens para contexto Multi-Turn.
+     */
+    private fun buildRecentConversationHistory(): List<Pair<String, String>> {
+        val msgs = _chatMessages.value.drop(1) // ignora mensagem de boas-vindas
+        val pairs = mutableListOf<Pair<String, String>>()
+        var lastUserText: String? = null
+        for (m in msgs) {
+            if (m.isUser) {
+                lastUserText = m.text
+            } else if (lastUserText != null && !m.requiresFreeTopicConfirmation) {
+                pairs.add(lastUserText to m.text)
+                lastUserText = null
+            }
+        }
+        return pairs.takeLast(3)
+    }
+
+    /**
      * Envia uma pergunta no Chat:
-     * - Se houver uma pergunta de Tema Livre aguardando confirmação e o usuário disser "Sim", responde o tema livre.
-     * - Se o usuário pedir mais detalhes sobre a resposta anterior, aprofunda o tópico.
-     * - Se a pergunta for do escopo de sobrevivência, responde de forma natural e sucinta (ou detalhada se pedido).
-     * - Se a pergunta estiver fora do escopo, questiona antes se o usuário quer falar sobre esse tema livre.
+     * - No MODO CHAT LIVRE (Estilo Google AI Edge Gallery, `_ragModeAi.value == false`):
+     *   conversa livremente 100% offline sobre qualquer assunto sem bloqueio de escopo.
+     * - No MODO RAG (`_ragModeAi.value == true`):
+     *   usa a Base Oficial de Sobrevivência (30 protocolos) + estoque/família, e pede confirmação
+     *   antes de responder perguntas fora do escopo.
      */
     fun askRagQuestion(question: String) {
         val cleanQuestion = question.trim()
         if (cleanQuestion.isBlank()) return
 
+        val recentHistory = buildRecentConversationHistory()
         val userMessage = ChatMessage(
             text = cleanQuestion,
             isUser = true
@@ -600,6 +623,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isRagLoading.value = true
 
+            // MODO CHAT LIVRE (ESTILO GOOGLE AI EDGE GALLERY — 100% OFFLINE)
+            if (!_ragModeAi.value) {
+                pendingFreeTopicQuestion = null
+                val lastTopic = lastAnsweredTopicQuery
+                val isShortFollowUpForDetails = lastTopic != null &&
+                    pdfRagManager.isUserAskingForMoreDetails(cleanQuestion) &&
+                    cleanQuestion.split(Regex("\\s+")).size <= 6
+
+                val response = if (isShortFollowUpForDetails && lastTopic != null) {
+                    pdfRagManager.chatFreelyEdgeGallery(
+                        query = lastTopic,
+                        recentHistory = recentHistory,
+                        detailed = true
+                    )
+                } else {
+                    lastAnsweredTopicQuery = cleanQuestion
+                    lastAnsweredWasFreeTopic = true
+                    pdfRagManager.chatFreelyEdgeGallery(
+                        query = cleanQuestion,
+                        recentHistory = recentHistory,
+                        detailed = false
+                    )
+                }
+
+                _ragResponse.value = response
+                _chatMessages.value = _chatMessages.value + ChatMessage(
+                    text = response.answer,
+                    isUser = false,
+                    executionMode = response.executionMode,
+                    citedSources = response.citedSources,
+                    canExpandDetails = response.canExpandDetails,
+                    topicQueryForExpansion = response.topicQueryForExpansion,
+                    isFreeTopic = true
+                )
+                _isRagLoading.value = false
+                return@launch
+            }
+
+            // MODO RAG (PROTOCOLOS DE SOBREVIVÊNCIA + CONFIRMAÇÃO DE TEMA LIVRE)
             // 1. Verifica se está aguardando confirmação de Tema Livre ("Sim" / "Não")
             val pendingFree = pendingFreeTopicQuestion
             if (pendingFree != null) {
@@ -607,7 +669,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     pendingFreeTopicQuestion = null
                     lastAnsweredTopicQuery = pendingFree
                     lastAnsweredWasFreeTopic = true
-                    val freeResp = pdfRagManager.answerFreeTopicQuestion(pendingFree, detailed = false)
+                    val freeResp = pdfRagManager.answerFreeTopicQuestion(
+                        freeQuery = pendingFree,
+                        detailed = false,
+                        recentHistory = recentHistory
+                    )
                     _ragResponse.value = freeResp
                     _chatMessages.value = _chatMessages.value + ChatMessage(
                         text = freeResp.answer,
@@ -643,7 +709,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             if (isShortFollowUpForDetails && lastTopic != null) {
                 val detailedResp = if (lastAnsweredWasFreeTopic) {
-                    pdfRagManager.answerFreeTopicQuestion(lastTopic, detailed = true)
+                    pdfRagManager.answerFreeTopicQuestion(
+                        freeQuery = lastTopic,
+                        detailed = true,
+                        recentHistory = recentHistory
+                    )
                 } else {
                     pdfRagManager.searchLocalAiRag(lastTopic, forceDetailed = true)
                 }
@@ -951,6 +1021,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val item = uiState.value.allRegisteredItems.find { it.id == itemId } ?: return@launch
             val newExp = monthYearToExpirationTimestamp(month, year)
             repository.updateItem(item.copy(expirationDate = newExp))
+            ExpirationWorker.runImmediateCheck(getApplication())
+            scheduleAutoBackup()
+        }
+    }
+
+    /**
+     * Atualiza um produto existente (incluindo sua CATEGORIA, local, nome, código de barras,
+     * quantidade, unidade e validade Mês/Ano), disparando automaticamente a reavaliação
+     * dos protocolos de sobrevivência e alertas da nova categoria.
+     */
+    fun updateInventoryItem(
+        itemId: Long,
+        name: String,
+        barcode: String?,
+        category: ItemCategory,
+        location: StorageLocation,
+        quantity: Double,
+        unit: String,
+        expirationMonth: Int?,
+        expirationYear: Int?,
+        resetBatteryMaintenanceNow: Boolean = false
+    ) {
+        viewModelScope.launch {
+            val existing = uiState.value.allRegisteredItems.find { it.id == itemId } ?: return@launch
+            val newExp = monthYearToExpirationTimestamp(expirationMonth, expirationYear)
+            val updatedMaint = when {
+                resetBatteryMaintenanceNow -> System.currentTimeMillis()
+                category == ItemCategory.ENERGY_GEAR && existing.lastMaintenanceDate == null -> System.currentTimeMillis()
+                else -> existing.lastMaintenanceDate
+            }
+
+            val updatedItem = existing.copy(
+                name = name.trim().ifBlank { existing.name },
+                barcode = barcode?.trim()?.ifBlank { null },
+                category = category,
+                location = location,
+                quantity = quantity.coerceAtLeast(0.0),
+                unit = unit.trim().ifBlank { existing.unit },
+                expirationDate = newExp,
+                lastMaintenanceDate = updatedMaint
+            )
+
+            repository.updateItem(updatedItem)
+            ExpirationWorker.runImmediateCheck(getApplication())
             scheduleAutoBackup()
         }
     }

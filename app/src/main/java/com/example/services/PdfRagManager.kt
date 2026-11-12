@@ -15,11 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
 import java.text.Normalizer
 import java.util.Locale
 
@@ -543,32 +539,163 @@ class PdfRagManager(
     }
 
     /**
-     * Executado quando o usuário confirma ("Sim") que deseja que a IA responda a uma pergunta
-     * fora do escopo de sobrevivência (Tema Livre), utilizando toda a capacidade do modelo.
+     * Modo 2: CHAT LIVRE (Estilo Google AI Edge Gallery — 100% Offline).
+     * Permite conversar livremente sobre qualquer assunto (ciências, matemática, culinária,
+     * história, tecnologia, mecânica ou sobrevivência) sem bloqueio de escopo e mantendo
+     * o histórico de múltiplos turnos da conversa.
      */
-    suspend fun answerFreeTopicQuestion(
-        freeQuery: String,
+    suspend fun chatFreelyEdgeGallery(
+        query: String,
+        recentHistory: List<Pair<String, String>> = emptyList(),
         detailed: Boolean = false,
         customModelPath: String? = null
     ): RagResponse = withContext(Dispatchers.IO) {
-        val wantsDetails = detailed || isUserAskingForMoreDetails(freeQuery)
+        val cleanQuery = query.trim()
+        val wantsDetails = detailed || isUserAskingForMoreDetails(cleanQuery)
 
-        val freePrompt = if (wantsDetails) {
-            "Você é um assistente inteligente, natural e prestativo. Responda em português de forma completa, clara e bem explicada à seguinte pergunta do usuário:\n\nPergunta: $freeQuery\n\nResposta:"
-        } else {
-            "Você é um assistente inteligente, natural e prestativo. Responda em português com naturalidade e de forma sucinta e direta (3 a 5 frases claras) à seguinte pergunta do usuário:\n\nPergunta: $freeQuery\n\nResposta:"
+        // 1. Saudação ou conversa rápida natural
+        checkGreetingOrSmallTalk(cleanQuery)?.let { greetingReply ->
+            return@withContext RagResponse(
+                query = cleanQuery,
+                promptBuilt = cleanQuery,
+                answer = greetingReply,
+                citedSources = emptyList(),
+                executionMode = "EDGE GALLERY • CHAT LIVRE OFFLINE"
+            )
         }
 
-        // Camada 1: Se o modelo LLM local MediaPipe Gemma (.task / .bin) estiver carregado no aparelho
+        // 2. Pergunta direta sobre o estoque ou família do usuário no app
+        checkPersonalAppDatabaseQuery(cleanQuery)?.let { personalReply ->
+            return@withContext RagResponse(
+                query = cleanQuery,
+                promptBuilt = cleanQuery,
+                answer = personalReply,
+                citedSources = emptyList(),
+                executionMode = "EDGE GALLERY • DADOS DO APP"
+            )
+        }
+
+        // 3. Constrói prompt multi-turn no padrão Gemma / Google AI Edge Gallery
+        val multiTurnPrompt = buildEdgeGalleryMultiTurnPrompt(cleanQuery, recentHistory, wantsDetails)
+
+        // 4. Se o arquivo de modelo neural (.task / .litertlm / .bin) estiver carregado no aparelho via MediaPipe
         val modelFile = findLocalModelFile(customModelPath)
         if (modelFile != null && modelFile.exists()) {
             try {
                 val llm = getOrCreateLlmInference(modelFile, isFreeTopic = true)
-                val llmAnswer = llm.generateResponse(freePrompt).trim()
+                val llmAnswer = llm.generateResponse(multiTurnPrompt).trim()
+                if (llmAnswer.isNotBlank()) {
+                    return@withContext RagResponse(
+                        query = cleanQuery,
+                        promptBuilt = multiTurnPrompt,
+                        answer = llmAnswer,
+                        citedSources = emptyList(),
+                        executionMode = "EDGE GALLERY • ${modelFile.name}",
+                        canExpandDetails = !wantsDetails,
+                        topicQueryForExpansion = cleanQuery
+                    )
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Alternando para motor cognitivo local embarcado", t)
+            }
+        }
+
+        // 5. No modo Chat Livre, também verifica se a pergunta é de sobrevivência (respondendo direto sem bloqueio)
+        //    ou se é de conhecimento geral (respondendo pelo OfflineEdgeKnowledgeEngine 100% offline)
+        val rawKeywords = extractKeywords(cleanQuery)
+        val expandedTerms = expandQueryKeywords(rawKeywords)
+        val allChunks = database.manualChunkDao().getAllChunks().first()
+        val matchingSurvival = if (expandedTerms.isNotEmpty()) {
+            allChunks.map { chunk ->
+                val normContent = normalizeAccents(chunk.contentText)
+                val normTitle = normalizeAccents(chunk.docTitle)
+                var score = 0
+                for ((term, weight) in expandedTerms) {
+                    val wordRegex = Regex("\\b${Regex.escape(term)}")
+                    if (wordRegex.containsMatchIn(normTitle)) score += (weight * 2)
+                    if (wordRegex.containsMatchIn(normContent)) score += weight
+                }
+                Pair(chunk, score)
+            }.filter { it.second >= 16 }.sortedByDescending { it.second }
+        } else emptyList()
+
+        if (matchingSurvival.isNotEmpty()) {
+            val topChunks = matchingSurvival.take(if (wantsDetails) 3 else 2).map { it.first }
+            val (ans, _) = naturalOfficialSynthesis(cleanQuery, topChunks, wantsDetails)
+            return@withContext RagResponse(
+                query = cleanQuery,
+                promptBuilt = multiTurnPrompt,
+                answer = ans,
+                citedSources = topChunks,
+                executionMode = "EDGE GALLERY • BASE LOCAL OFFLINE",
+                canExpandDetails = !wantsDetails,
+                topicQueryForExpansion = cleanQuery
+            )
+        }
+
+        val edgeOfflineReply = OfflineEdgeKnowledgeEngine.generateOfflineResponse(
+            query = cleanQuery,
+            detailed = wantsDetails,
+            recentHistory = recentHistory
+        )
+
+        RagResponse(
+            query = cleanQuery,
+            promptBuilt = multiTurnPrompt,
+            answer = edgeOfflineReply,
+            citedSources = emptyList(),
+            executionMode = "EDGE GALLERY • MOTOR LOCAL OFFLINE",
+            canExpandDetails = !wantsDetails,
+            topicQueryForExpansion = cleanQuery
+        )
+    }
+
+    private fun buildEdgeGalleryMultiTurnPrompt(
+        currentQuery: String,
+        recentHistory: List<Pair<String, String>>,
+        wantsDetails: Boolean
+    ): String {
+        val styleRule = if (wantsDetails) {
+            "Responda em português de forma natural, completa, detalhada e passo a passo."
+        } else {
+            "Responda em português com naturalidade e de forma sucinta, clara e direta (3 a 5 frases)."
+        }
+        return buildString {
+            append("<start_of_turn>user\n")
+            append("Instrução do Sistema: Você é uma IA local rodando 100% offline no dispositivo (estilo Google AI Edge Gallery). $styleRule\n")
+            append("<end_of_turn>\n")
+            recentHistory.takeLast(3).forEach { (userTurn, aiTurn) ->
+                append("<start_of_turn>user\n").append(userTurn).append("\n<end_of_turn>\n")
+                append("<start_of_turn>model\n").append(aiTurn).append("\n<end_of_turn>\n")
+            }
+            append("<start_of_turn>user\n").append(currentQuery).append("\n<end_of_turn>\n")
+            append("<start_of_turn>model\n")
+        }
+    }
+
+    /**
+     * Executado quando o usuário confirma ("Sim") que deseja que a IA responda a uma pergunta
+     * fora do escopo de sobrevivência (Tema Livre) no Modo RAG, utilizando toda a capacidade local 100% offline.
+     */
+    suspend fun answerFreeTopicQuestion(
+        freeQuery: String,
+        detailed: Boolean = false,
+        customModelPath: String? = null,
+        recentHistory: List<Pair<String, String>> = emptyList()
+    ): RagResponse = withContext(Dispatchers.IO) {
+        val wantsDetails = detailed || isUserAskingForMoreDetails(freeQuery)
+        val multiTurnPrompt = buildEdgeGalleryMultiTurnPrompt(freeQuery, recentHistory, wantsDetails)
+
+        // Camada 1: Se o modelo LLM local MediaPipe (.task / .litertlm / .bin) estiver carregado no aparelho
+        val modelFile = findLocalModelFile(customModelPath)
+        if (modelFile != null && modelFile.exists()) {
+            try {
+                val llm = getOrCreateLlmInference(modelFile, isFreeTopic = true)
+                val llmAnswer = llm.generateResponse(multiTurnPrompt).trim()
                 if (llmAnswer.isNotBlank()) {
                     return@withContext RagResponse(
                         query = freeQuery,
-                        promptBuilt = freePrompt,
+                        promptBuilt = multiTurnPrompt,
                         answer = llmAnswer,
                         citedSources = emptyList(),
                         executionMode = "TEMA LIVRE • IA LOCAL (${modelFile.name})",
@@ -577,32 +704,22 @@ class PdfRagManager(
                     )
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "Falha no modelo local em tema livre, tentando síntese aberta", t)
+                Log.w(TAG, "Alternando para motor cognitivo local embarcado", t)
             }
         }
 
-        // Camada 2: Capacidade de Modelo Aberto (se houver conexão disponível no momento)
-        val cloudModelAnswer = tryOpenDomainModelInference(freeQuery, wantsDetails)
-        if (!cloudModelAnswer.isNullOrBlank()) {
-            return@withContext RagResponse(
-                query = freeQuery,
-                promptBuilt = freePrompt,
-                answer = cloudModelAnswer,
-                citedSources = emptyList(),
-                executionMode = "TEMA LIVRE • IA ABERTA",
-                canExpandDetails = !wantsDetails,
-                topicQueryForExpansion = freeQuery
-            )
-        }
-
-        // Camada 3: Fallback Enciclopédico / Raciocínio Geral 100% Offline
-        val offlineFreeAnswer = generateOfflineFreeTopicFallback(freeQuery, wantsDetails)
+        // Camada 2: Motor Cognitivo e Enciclopédico 100% Offline Embarcado
+        val offlineFreeAnswer = OfflineEdgeKnowledgeEngine.generateOfflineResponse(
+            query = freeQuery,
+            detailed = wantsDetails,
+            recentHistory = recentHistory
+        )
         RagResponse(
             query = freeQuery,
-            promptBuilt = freePrompt,
+            promptBuilt = multiTurnPrompt,
             answer = offlineFreeAnswer,
             citedSources = emptyList(),
-            executionMode = "TEMA LIVRE • MODO OFFLINE",
+            executionMode = "TEMA LIVRE • IA LOCAL OFFLINE",
             canExpandDetails = !wantsDetails,
             topicQueryForExpansion = freeQuery
         )
@@ -734,115 +851,14 @@ class PdfRagManager(
         }
     }
 
-    /**
-     * Consulta aberta para perguntas de Tema Livre confirmadas pelo usuário.
-     */
-    private fun tryOpenDomainModelInference(query: String, detailed: Boolean): String? {
-        // 1. Tenta inferência generativa aberta (Pollinations Text API - gratuita, sem chave)
-        try {
-            val sysInstruction = if (detailed) {
-                "Responda em português do Brasil de forma natural, clara, amigável e detalhada: "
-            } else {
-                "Responda em português do Brasil com naturalidade e de forma sucinta e direta (em até 4 frases curtas): "
-            }
-            val encodedPrompt = URLEncoder.encode(sysInstruction + query, "UTF-8")
-            val url = URL("https://text.pollinations.ai/$encodedPrompt")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 5500
-                readTimeout = 6500
-                setRequestProperty("User-Agent", "ResilienceHub-Assistant/1.0")
-            }
-            if (conn.responseCode in 200..299) {
-                val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
-                if (text.isNotBlank() && text.length > 10 && !text.startsWith("<!DOCTYPE", true)) {
-                    return if (!detailed) {
-                        "$text\n\n*(Se quiser que eu aprofunde mais nesse assunto, é só pedir!)*"
-                    } else {
-                        text
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.d(TAG, "Pollinations indisponível ou sem internet no momento", e)
-        }
-
-        // 2. Fallback enciclopédico via Wikipedia PT REST API se houver conexão
-        try {
-            val cleanSubject = query
-                .replace(Regex("(?i)^(o que e|o que sao|quem foi|quem e|como funciona|me fale sobre|fale sobre|explique)\\s+"), "")
-                .replace("?", "")
-                .trim()
-            val encodedSubject = URLEncoder.encode(cleanSubject, "UTF-8")
-            val wikiUrl = URL("https://pt.wikipedia.org/api/rest_v1/page/summary/$encodedSubject")
-            val conn = (wikiUrl.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 4000
-                readTimeout = 4500
-                setRequestProperty("User-Agent", "ResilienceHub/1.0")
-            }
-            if (conn.responseCode in 200..299) {
-                val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                val json = JSONObject(body)
-                val extract = json.optString("extract", "").trim()
-                if (extract.isNotBlank()) {
-                    return if (!detailed && extract.length > 320) {
-                        val shortExtract = extract.split(Regex("(?<=\\.)\\s+")).take(2).joinToString(" ")
-                        "$shortExtract\n\n*(Quer mais detalhes sobre esse tema? É só pedir!)*"
-                    } else {
-                        extract
-                    }
-                }
-            }
-        } catch (_: Exception) {
-        }
-
-        return null
-    }
-
-    /**
-     * Quando o celular está 100% desconectado da internet e sem o arquivo `.task` importado,
-     * ainda responde cálculos matemáticos, conversões e temas gerais com naturalidade.
-     */
-    private fun generateOfflineFreeTopicFallback(query: String, detailed: Boolean): String {
-        val norm = normalizeAccents(query)
-
-        // Verifica se é uma conta matemática simples
-        val mathMatch = Regex("(-?\\d+(?:[.,]\\d+)?)\\s*([+\\-*/xX])\\s*(-?\\d+(?:[.,]\\d+)?)").find(norm)
-        if (mathMatch != null) {
-            val a = mathMatch.groupValues[1].replace(",", ".").toDoubleOrNull()
-            val op = mathMatch.groupValues[2]
-            val b = mathMatch.groupValues[3].replace(",", ".").toDoubleOrNull()
-            if (a != null && b != null) {
-                val res = when (op) {
-                    "+" -> a + b
-                    "-" -> a - b
-                    "*", "x", "X" -> a * b
-                    "/" -> if (b != 0.0) a / b else Double.NaN
-                    else -> Double.NaN
-                }
-                if (!res.isNaN()) {
-                    val formatted = if (res % 1.0 == 0.0) res.toLong().toString() else String.format(Locale.US, "%.2f", res)
-                    return "O resultado de **$a $op $b** é **$formatted**."
-                }
-            }
-        }
-
-        return if (detailed) {
-            "Você confirmou a consulta de tema livre para **\"$query\"**.\n\n" +
-                "No momento seu celular está **100% offline** e sem um arquivo de modelo aberto (`.task` / Gemma) importado. " +
-                "Para que eu possa responder qualquer assunto de conhecimento geral (culinária, história, ciências, programação, etc.) mesmo sem internet, " +
-                "toque no botão **\"LLM .task\"** no topo desta tela e carregue o arquivo do modelo Gemma no aparelho, ou conecte-se à internet."
-        } else {
-            "Certo! Como estamos **100% offline** neste momento e sem o arquivo `.task` (Gemma) carregado, minha memória local instalada foca nos 30 protocolos de sobrevivência e nos dados da sua família. " +
-                "Se você conectar à internet ou importar o arquivo **LLM .task** no botão lá no topo, respondo sobre **\"$query\"** e qualquer outro tema livre na hora!"
-        }
-    }
-
     suspend fun importModelFromUri(modelUri: Uri): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val rawName = getFileNameFromUri(modelUri) ?: "gemma-4-E2B-it.task"
-            val safeName = if (rawName.endsWith(".task") || rawName.endsWith(".bin")) rawName else "$rawName.task"
+            val rawName = getFileNameFromUri(modelUri) ?: "gemma-edge-local.task"
+            val isValidExt = rawName.endsWith(".task", true) ||
+                rawName.endsWith(".litertlm", true) ||
+                rawName.endsWith(".bin", true) ||
+                rawName.endsWith(".tflite", true)
+            val safeName = if (isValidExt) rawName else "$rawName.task"
             val destFile = File(context.filesDir, safeName)
 
             val inputStream = context.contentResolver.openInputStream(modelUri)
@@ -868,6 +884,16 @@ class PdfRagManager(
         }
     }
 
+    fun getActiveLocalModelDescription(): String {
+        val model = findLocalModelFile()
+        return if (model != null && model.exists()) {
+            val sizeMb = model.length() / (1024 * 1024)
+            "Modelo Neural Ativo: ${model.name} (${sizeMb} MB • MediaPipe Edge)"
+        } else {
+            "Motor Cognitivo Local Embarcado Ativo (100% Offline • Pronto para .task/.litertlm)"
+        }
+    }
+
     fun findLocalModelFile(customPath: String? = null): File? {
         if (!customPath.isNullOrBlank()) {
             val f = File(customPath)
@@ -878,22 +904,33 @@ class PdfRagManager(
             if (f.exists() && f.length() > 1024) return f
         }
 
-        val dynamicSearchDirs = listOfNotNull(context.filesDir, context.getExternalFilesDir(null))
+        val supportedExts = listOf(".task", ".litertlm", ".bin", ".tflite")
+        val dynamicSearchDirs = listOfNotNull(
+            context.filesDir,
+            context.getExternalFilesDir(null),
+            File("/sdcard/Download"),
+            File("/sdcard/Android/data/com.google.ai.edge.gallery/files")
+        )
         for (dir in dynamicSearchDirs) {
-            val found = dir.listFiles()?.firstOrNull {
-                it.isFile && (it.name.endsWith(".task", true) || it.name.endsWith(".bin", true)) && it.length() > 1024 * 1024
+            if (!dir.exists() || !dir.canRead()) continue
+            val found = dir.walkTopDown().maxDepth(3).firstOrNull { file ->
+                file.isFile &&
+                    supportedExts.any { ext -> file.name.endsWith(ext, ignoreCase = true) } &&
+                    file.length() > 1024 * 1024
             }
             if (found != null) return found
         }
 
         val candidateLocations = listOf(
             File(context.filesDir, "gemma-4-E2B-it.task"),
+            File(context.filesDir, "gemma3-1b-it-int4.task"),
             File(context.filesDir, "gemma2-2b-it-gpu-int8.task"),
             File(context.filesDir, "gemma-2b-it-cpu-int4.bin"),
             File(context.filesDir, "gemma-2b.bin"),
             File(context.filesDir, "model.bin"),
             File(context.getExternalFilesDir(null), "gemma-4-E2B-it.task"),
             File("/sdcard/Download/gemma-4-E2B-it.task"),
+            File("/sdcard/Download/gemma3-1b-it-int4.task"),
             File("/data/local/tmp/gemma-4-E2B-it.task"),
             File("/data/local/tmp/gemma-2b-it-cpu-int4.bin")
         )

@@ -49,7 +49,8 @@ class RationingAndAlertEngine {
         val status: ItemAlertStatus,
         val daysUntilExpiration: Double?,
         val daysSinceMaintenance: Double?,
-        val alertMessage: String
+        val alertMessage: String,
+        val protocolRuleSummary: String = ""
     )
 
     data class PoiNavigationInfo(
@@ -149,19 +150,33 @@ class RationingAndAlertEngine {
     // =========================================================================
 
     /**
-     * Avalia o status crítico do item de acordo com a política FEFO e ciclos de 90 dias de bateria.
-     * Regras:
-     * - ENERGY_GEAR sem manutenção há >= 90 dias -> RECARREGAR_BATERIA
-     * - Vencido (< 0 dias) -> VENCIDO
-     * - Validade <= 30 dias -> CRITICO_30_DIAS
-     * - Validade <= 90 dias -> GIRAR_90_DIAS (consumir em casa e repor)
-     * - Demais casos -> OK
+     * Retorna a diretriz oficial de sobrevivência monitorada automaticamente para cada categoria.
+     */
+    fun getCategorySurvivalProtocolRule(category: ItemCategory): String {
+        return when (category) {
+            ItemCategory.WATER ->
+                "Protocolo OMS & Defesa Civil (Água): Giro FEFO aos 90d/30d; reserva 2,5L/dia (Apto) e 2L/dia (Mochila 72h); se vencida, ferver 1 min ou 2 gotas hipoclorito 2,5%/L."
+            ItemCategory.FOOD ->
+                "Protocolo FEMA & ANVISA (Alimentos): Giro FEFO 90d/30d; inspeção rigorosa contra latas estufadas/botulismo e proteção hermética."
+            ItemCategory.MEDS ->
+                "Protocolo Min. Saúde & Cruz Vermelha (Farmácia): Alerta rigoroso 90d/30d; proibição de antibióticos/colírios vencidos e revisão de receitas contínuas."
+            ItemCategory.ENERGY_GEAR ->
+                "Protocolo FEMA & Bombeiros (Energia/Rádio): Ciclo obrigatório de teste e recarga a cada 90 dias; guardar pilhas fora do aparelho contra vazamento."
+            ItemCategory.HYGIENE_DOCS ->
+                "Protocolo Defesa Civil & OMS (Higiene/Docs): Revisão 90d/30d de químicos sanitários (cloro/álcool perdem força) e vedação impermeável de documentos."
+        }
+    }
+
+    /**
+     * Avalia o status crítico do item automaticamente com base na sua CATEGORIA e nos
+     * Protocolos Oficiais de Sobrevivência (OMS, Defesa Civil, Ministério da Saúde, ANVISA, FEMA, Cruz Vermelha).
      */
     fun evaluateItemStatus(
         item: InventoryItemEntity,
         nowMillis: Long = System.currentTimeMillis()
     ): ItemEvaluationResult {
         val dayMillis = 24.0 * 3600 * 1000
+        val protocolRule = getCategorySurvivalProtocolRule(item.category)
 
         var daysUntilExpiration: Double? = null
         if (item.expirationDate != null) {
@@ -173,7 +188,7 @@ class RationingAndAlertEngine {
             daysSinceMaintenance = (nowMillis - item.lastMaintenanceDate) / dayMillis
         }
 
-        // 1. Regra de ciclo de bateria/equipamento
+        // 1. Regra automática da categoria ENERGY_GEAR (Protocolo FEMA / Bombeiros: ciclo de 90 dias)
         if (item.category == ItemCategory.ENERGY_GEAR) {
             if (item.lastMaintenanceDate == null || (daysSinceMaintenance ?: 0.0) >= BATTERY_MAINTENANCE_INTERVAL_DAYS) {
                 val dias = daysSinceMaintenance?.roundToInt() ?: 90
@@ -182,45 +197,93 @@ class RationingAndAlertEngine {
                     status = ItemAlertStatus.RECARREGAR_BATERIA,
                     daysUntilExpiration = daysUntilExpiration,
                     daysSinceMaintenance = daysSinceMaintenance,
-                    alertMessage = "Bateria/Equipamento sem ciclo de recarga há $dias dias (meta: máximo 90 dias)."
+                    alertMessage = "🔋 Protocolo FEMA/Bombeiros (Energia): Sem ciclo de recarga/teste há $dias dias (limite: 90d). Recarregue baterias a 100%, teste lanterna/rádio e retire pilhas alcalinas do compartimento.",
+                    protocolRuleSummary = protocolRule
                 )
             }
         }
 
-        // 2. Regra de validade cronológica FEFO
+        // 2. Regras automáticas de validade FEFO específicas por Categoria segundo os Protocolos Oficiais
         if (daysUntilExpiration != null) {
             if (daysUntilExpiration < 0) {
                 val diasVencido = (-daysUntilExpiration).roundToInt()
+                val categoryExpiredMsg = when (item.category) {
+                    ItemCategory.WATER ->
+                        "⚠️ Protocolo OMS/Min. Saúde (Água): Vencida há $diasVencido dias! Não beba direto: ferva por 1 min ou trate com 2 gotas de Hipoclorito 2,5%/L (30 min) e renove o estoque."
+                    ItemCategory.FOOD ->
+                        "⚠️ Protocolo ANVISA/FEMA (Alimentos): Vencido há $diasVencido dias! Risco de contaminação/botulismo. Descarte se houver lata estufada, ferrugem ou odor alterado e substitua."
+                    ItemCategory.MEDS ->
+                        "⚠️ Protocolo ANVISA/Min. Saúde (Farmácia): Medicamento/insumo vencido há $diasVencido dias! Perda de eficácia terapêutica e risco químico. Substitua imediatamente."
+                    ItemCategory.ENERGY_GEAR ->
+                        "⚠️ Protocolo FEMA (Energia): Pilha/Bateria química vencida há $diasVencido dias! Risco de vazamento ácido nos contatos. Descarte e substitua."
+                    ItemCategory.HYGIENE_DOCS ->
+                        "⚠️ Protocolo Defesa Civil/OMS (Higiene & Docs): Expirado há $diasVencido dias! Renove a documentação/receita ou substitua cloro/álcool 70% (perda de princípio ativo)."
+                }
                 return ItemEvaluationResult(
                     item = item,
                     status = ItemAlertStatus.VENCIDO,
                     daysUntilExpiration = daysUntilExpiration,
                     daysSinceMaintenance = daysSinceMaintenance,
-                    alertMessage = "Item vencido há $diasVencido dias. Descarte ou substitua imediatamente."
+                    alertMessage = categoryExpiredMsg,
+                    protocolRuleSummary = protocolRule
                 )
             }
 
             if (daysUntilExpiration <= 30.0) {
                 val diasRestantes = daysUntilExpiration.roundToInt()
+                val categoryCriticalMsg = when (item.category) {
+                    ItemCategory.WATER ->
+                        "🚨 Protocolo Defesa Civil (Água): Validade crítica ($diasRestantes dias)! Consuma esta água na rotina doméstica agora e abasteça galões novos lacrados."
+                    ItemCategory.FOOD ->
+                        "🚨 Protocolo FEFO (Alimentos): Validade crítica ($diasRestantes dias)! Priorize no cardápio da casa esta semana e reponha com lote novo."
+                    ItemCategory.MEDS ->
+                        "🚨 Protocolo Min. Saúde (Farmácia): Validade crítica ($diasRestantes dias)! Providencie receita e reposição imediata para não faltar em emergência."
+                    ItemCategory.ENERGY_GEAR ->
+                        "🚨 Protocolo FEMA (Energia): Validade química crítica ($diasRestantes dias)! Utilize na rotina e compre pilhas/baterias novas."
+                    ItemCategory.HYGIENE_DOCS ->
+                        "🚨 Protocolo Defesa Civil (Higiene & Docs): Vence em $diasRestantes dias! Providencie renovação documental ou reposição de itens sanitários."
+                }
                 return ItemEvaluationResult(
                     item = item,
                     status = ItemAlertStatus.CRITICO_30_DIAS,
                     daysUntilExpiration = daysUntilExpiration,
                     daysSinceMaintenance = daysSinceMaintenance,
-                    alertMessage = "Validade crítica! Restam apenas $diasRestantes dias para vencer."
+                    alertMessage = categoryCriticalMsg,
+                    protocolRuleSummary = protocolRule
                 )
             }
 
             if (daysUntilExpiration <= 90.0) {
                 val diasRestantes = daysUntilExpiration.roundToInt()
+                val categoryRotateMsg = when (item.category) {
+                    ItemCategory.WATER ->
+                        "🔄 Giro Hídrico FEFO (OMS): Vence em $diasRestantes dias. Use na rotina da casa e reponha (manter no escuro e longe do chão)."
+                    ItemCategory.FOOD ->
+                        "🔄 Giro Alimentar FEFO (Defesa Civil): Vence em $diasRestantes dias. Consuma na rotina doméstica e reabasteça o estoque de crise."
+                    ItemCategory.MEDS ->
+                        "🔄 Revisão de Farmácia (Cruz Vermelha): Vence em $diasRestantes dias. Planeje a substituição preventiva no kit de trauma/uso contínuo."
+                    ItemCategory.ENERGY_GEAR ->
+                        "🔄 Giro de Energia (FEMA): Vence em $diasRestantes dias. Teste a carga e programe reposição preventiva."
+                    ItemCategory.HYGIENE_DOCS ->
+                        "🔄 Revisão de Higiene & Docs (Defesa Civil): Vence em $diasRestantes dias. Confira vedação estanque (zip-lock) e programe renovação."
+                }
                 return ItemEvaluationResult(
                     item = item,
                     status = ItemAlertStatus.GIRAR_90_DIAS,
                     daysUntilExpiration = daysUntilExpiration,
                     daysSinceMaintenance = daysSinceMaintenance,
-                    alertMessage = "Girar estoque: Vence em $diasRestantes dias. Consuma na rotina doméstica e reabasteça."
+                    alertMessage = categoryRotateMsg,
+                    protocolRuleSummary = protocolRule
                 )
             }
+        }
+
+        val okMsg = when (item.category) {
+            ItemCategory.ENERGY_GEAR -> {
+                val diasRestantesCarga = (BATTERY_MAINTENANCE_INTERVAL_DAYS - (daysSinceMaintenance?.roundToInt() ?: 0)).coerceAtLeast(0)
+                "✓ Protocolo FEMA/Bombeiros em dia: Próximo ciclo obrigatório de recarga em $diasRestantesCarga dias."
+            }
+            else -> "✓ Em conformidade com o protocolo oficial da categoria (${item.category.displayName})."
         }
 
         return ItemEvaluationResult(
@@ -228,7 +291,8 @@ class RationingAndAlertEngine {
             status = ItemAlertStatus.OK,
             daysUntilExpiration = daysUntilExpiration,
             daysSinceMaintenance = daysSinceMaintenance,
-            alertMessage = "Condição operacional e prazo dentro da margem de segurança."
+            alertMessage = okMsg,
+            protocolRuleSummary = protocolRule
         )
     }
 
