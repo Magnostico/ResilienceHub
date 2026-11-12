@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
             var showAddProfileDialog by remember { mutableStateOf(false) }
             var showAddManualDialog by remember { mutableStateOf(false) }
             var showConfirmClearAllApp by remember { mutableStateOf(false) }
+            var showBackupRestoreDialog by remember { mutableStateOf(false) }
 
             val permissionsToRequest = remember {
                 val list = mutableListOf(
@@ -80,6 +81,7 @@ class MainActivity : ComponentActivity() {
                             isWhistleActive = state.isWhistleActive,
                             isLiveTracking = state.isLiveTracking,
                             onToggleCrisisMode = { viewModel.toggleCrisisMode() },
+                            onOpenBackupDialog = { showBackupRestoreDialog = true },
                             onRequestClearAllData = { showConfirmClearAllApp = true }
                         )
                     },
@@ -215,6 +217,14 @@ class MainActivity : ComponentActivity() {
                             onConfirm = { viewModel.clearAllFictionalData() }
                         )
                     }
+
+                    if (showBackupRestoreDialog) {
+                        BackupRestoreDialog(
+                            state = state,
+                            viewModel = viewModel,
+                            onDismiss = { showBackupRestoreDialog = false }
+                        )
+                    }
                 }
             }
         }
@@ -229,6 +239,7 @@ fun ResilienceTopBar(
     isWhistleActive: Boolean,
     isLiveTracking: Boolean,
     onToggleCrisisMode: () -> Unit,
+    onOpenBackupDialog: () -> Unit,
     onRequestClearAllData: () -> Unit
 ) {
     TopAppBar(
@@ -296,6 +307,18 @@ fun ResilienceTopBar(
             }
         },
         actions = {
+            // Botão global de Backup Automático & Restauração
+            IconButton(
+                onClick = onOpenBackupDialog,
+                modifier = Modifier.testTag("btn_open_backup_dialog")
+            ) {
+                Icon(
+                    Icons.Default.Backup,
+                    contentDescription = "Backup e Restauração",
+                    tint = Color(0xFF34D399)
+                )
+            }
+
             // Botão global para apagar todos os dados fictícios do app de uma só vez
             IconButton(
                 onClick = onRequestClearAllData,

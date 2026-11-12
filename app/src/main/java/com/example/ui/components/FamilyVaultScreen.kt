@@ -43,6 +43,7 @@ fun FamilyVaultScreen(
     var pendingPdfUri by remember { mutableStateOf<Uri?>(null) }
     var pendingPdfDefaultTitle by remember { mutableStateOf("Receita Médica") }
     var viewingFamilyDoc by remember { mutableStateOf<FamilyDocument?>(null) }
+    var showBackupModal by remember { mutableStateOf(false) }
 
     val familyPdfPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -414,6 +415,85 @@ fun FamilyVaultScreen(
                 }
             }
         }
+
+        // --- 6. CARD DE BACKUP AUTOMÁTICO EXTERNO & RECUPERAÇÃO DE DADOS ---
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (crisisMode) Color.Black else Color(0xFF06241B)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.5.dp, Color(0xFF10B981)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("family_backup_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.Backup,
+                                contentDescription = null,
+                                tint = Color(0xFF34D399),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Rotina de Backup Seguro (Sem Entupir)",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 14.sp,
+                                    color = Color.White
+                                )
+                                val latestSnap = state.availableBackups.firstOrNull()
+                                Text(
+                                    text = if (latestSnap != null)
+                                        "Último: ${latestSnap.formattedDate} (${latestSnap.sizeKb} KB)"
+                                    else
+                                        "Pasta: Download/ResilienceHub_Backups (Máx 3 arquivos)",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF34D399)
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = { showBackupModal = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF10B981),
+                                contentColor = Color(0xFF090D16)
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text("Gerenciar / Restaurar", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Seus dados (Estoque, Família, Pontos do Mapa e PDFs) são salvos automaticamente em formato leve (.zip) fora da pasta interna do app, mantendo apenas os 3 backups mais recentes para proteger contra desinstalação sem ocupar espaço.",
+                        fontSize = 11.sp,
+                        color = Color(0xFFE2E8F0)
+                    )
+                }
+            }
+        }
+    }
+
+    if (showBackupModal) {
+        BackupRestoreDialog(
+            state = state,
+            viewModel = viewModel,
+            onDismiss = { showBackupModal = false }
+        )
     }
 
     // Modal para Editar Familiar

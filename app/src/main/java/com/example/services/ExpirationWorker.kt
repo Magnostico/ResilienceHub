@@ -83,6 +83,11 @@ class ExpirationWorker(
 
         return try {
             val database = AppDatabase.getInstance(context)
+            // Executa também a rotina diária de Auto-Backup com rotação de 3 arquivos (sem entupir o celular)
+            runCatching {
+                BackupManager(context, database).performRollingBackup(isAutoBackup = true)
+            }
+
             val allItems = database.inventoryDao().getAllItems().first()
 
             val engine = RationingAndAlertEngine()

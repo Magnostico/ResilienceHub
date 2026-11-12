@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -39,6 +41,8 @@ import com.example.data.model.ItemCategory
 import com.example.data.model.PoiType
 import com.example.data.model.StorageLocation
 import com.example.ui.FamilyDocument
+import com.example.ui.MainUiState
+import com.example.ui.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -1620,6 +1624,245 @@ fun ConfirmClearDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Cancelar", color = Color(0xFFCBD5E1))
+            }
+        }
+    )
+}
+
+/**
+ * Central de Backup Automático & Restauração sem Entupimento do Celular.
+ * Salva até 3 arquivos compactados (.zip) na pasta pública Download/ResilienceHub_Backups,
+ * que permanecem seguros mesmo se o app for desinstalado ou o cache/dados for limpo.
+ */
+@Composable
+fun BackupRestoreDialog(
+    state: MainUiState,
+    viewModel: MainViewModel,
+    onDismiss: () -> Unit
+) {
+    LaunchedEffect(Unit) {
+        viewModel.refreshAvailableBackups()
+    }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri: Uri? ->
+        uri?.let { viewModel.exportBackupToUri(it) }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let { viewModel.restoreFromBackupUri(it) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Backup, contentDescription = null, tint = Color(0xFF34D399))
+                Spacer(modifier = Modifier.width(8.dp))
+                Column {
+                    Text("Cofre de Backup & Restauração", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                    Text(
+                        "Auto-Backup Inteligente • Zero Entupimento (Máx. 3 arquivos)",
+                        fontSize = 10.sp,
+                        color = Color(0xFF34D399),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                // Explicação clara da proteção contra perda de dados
+                Surface(
+                    color = Color(0xFF090D16),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, Color(0xFF10B981)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "🛡 Proteção Automática Contra Desinstalação",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF34D399)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "• A cada alteração no Estoque, Família, PDFs ou Mapa, o app salva uma cópia compactada (.zip) na pasta pública Download/ResilienceHub_Backups.\n" +
+                                "• Para NÃO entupir seu celular, o sistema mantém no máximo 3 backups recentes e apaga os antigos sozinho.",
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                            color = Color(0xFFE2E8F0)
+                        )
+                    }
+                }
+
+                // Status ou feedback recente
+                state.backupStatusMessage?.let { msg ->
+                    Surface(
+                        color = Color(0xFF0C2434),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(10.dp)
+                        ) {
+                            if (state.isBackupBusy) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color(0xFFFBBF24)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                            Text(
+                                text = msg,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+
+                // Botões principais de ação rápida
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Button(
+                        onClick = { viewModel.triggerManualBackupNow() },
+                        enabled = !state.isBackupBusy,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF059669),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text("Backup Agora", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+
+                    Button(
+                        onClick = { importLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) },
+                        enabled = !state.isBackupBusy,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFF59E0B),
+                            contentColor = Color(0xFF090D16)
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text("Buscar .ZIP", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        exportLauncher.launch("ResilienceHub_Backup_Seguro.zip")
+                    },
+                    enabled = !state.isBackupBusy,
+                    border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        "Salvar Cópia em Outra Pasta / Google Drive",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+                }
+
+                Divider(color = Color(0xFF1E293B))
+
+                // Lista dos últimos 3 snapshots automáticos encontrados na pasta
+                Text(
+                    text = "Últimos Backups Automáticos no Aparelho (${state.availableBackups.size}/3):",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color(0xFFFBBF24)
+                )
+
+                if (state.availableBackups.isEmpty()) {
+                    Text(
+                        text = "Nenhum backup recente listado ainda ou você reinstalou o app agora. Toque em 'Buscar .ZIP' acima e selecione o arquivo na sua pasta Download/ResilienceHub_Backups para recuperar tudo!",
+                        fontSize = 11.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                } else {
+                    state.availableBackups.forEachIndexed { idx, snap ->
+                        Surface(
+                            color = Color(0xFF1E293B),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (idx == 0) Color(0xFF34D399) else Color(0xFF334155)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.padding(10.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (idx == 0) "⭐ Mais Recente: ${snap.formattedDate}" else "Snapshot: ${snap.formattedDate}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "${snap.itemsCount} itens • ${snap.profilesCount} familiares • ${snap.pdfsCount} PDFs • ${snap.sizeKb} KB",
+                                        fontSize = 10.sp,
+                                        color = Color(0xFF38BDF8)
+                                    )
+                                    Text(
+                                        text = "Pasta: Download/ResilienceHub_Backups",
+                                        fontSize = 9.sp,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+
+                                Button(
+                                    onClick = { viewModel.restoreFromSnapshot(snap) },
+                                    enabled = !state.isBackupBusy,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFFF59E0B),
+                                        contentColor = Color(0xFF090D16)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text("Restaurar", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Fechar", color = Color(0xFFFBBF24), fontWeight = FontWeight.ExtraBold)
             }
         }
     )

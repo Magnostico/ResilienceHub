@@ -15,10 +15,13 @@ import com.example.data.model.PoiType
 import com.example.data.model.StorageLocation
 import com.example.data.repository.ResilienceRepository
 import com.example.domain.RationingAndAlertEngine
+import com.example.services.BackupManager
 import com.example.services.ExpirationWorker
 import com.example.services.HardwareToolsManager
 import com.example.services.PdfRagManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -98,7 +101,12 @@ data class MainUiState(
     val ragResponse: PdfRagManager.RagResponse? = null,
     val isRagLoading: Boolean = false,
     val ragModeAi: Boolean = true,
-    val pdfImportStatus: String? = null
+    val pdfImportStatus: String? = null,
+
+    // Backup & Restore states
+    val availableBackups: List<BackupManager.BackupSnapshotInfo> = emptyList(),
+    val backupStatusMessage: String? = null,
+    val isBackupBusy: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -145,6 +153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val hardwareToolsManager = HardwareToolsManager(application)
     val pdfRagManager = PdfRagManager(application, database)
+    val backupManager = BackupManager(application, database)
 
     private val familyDocsDir = File(application.filesDir, "family_docs").apply {
         if (!exists()) mkdirs()
@@ -174,19 +183,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _ragModeAi = MutableStateFlow(true)
     private val _pdfImportStatus = MutableStateFlow<String?>(null)
 
+    // Backup & Restore States
+    private val _availableBackups = MutableStateFlow<List<BackupManager.BackupSnapshotInfo>>(emptyList())
+    private val _backupStatusMessage = MutableStateFlow<String?>(null)
+    private val _isBackupBusy = MutableStateFlow(false)
+    private var autoBackupJob: Job? = null
+
     private val _manualChunks = _manualQuery.flatMapLatest { query ->
         repository.searchManual(query)
     }
 
     init {
-        // Agenda a checagem diária em segundo plano do WorkManager
+        // Agenda a checagem diária em segundo plano do WorkManager (inclui Auto-Backup diário)
         ExpirationWorker.scheduleDailyCheck(application)
 
-        // Garante que a Base Oficial de Sobrevivência (30 protocolos dos órgãos oficiais)
-        // esteja carregada no banco SQLite FTS4 e carrega os PDFs de Receitas/Documentos da família
+        // Garante que a Base Oficial de Sobrevivência esteja carregada e verifica os backups disponíveis
         viewModelScope.launch {
             repository.ensureOfficialKnowledgeBaseSeeded()
             _familyDocuments.value = loadFamilyDocumentsFromDisk()
+            refreshAvailableBackups()
+            if (_availableBackups.value.isEmpty()) {
+                // Gera o primeiro snapshot automático sem bloquear a inicialização
+                delay(1500)
+                backupManager.performRollingBackup(isAutoBackup = true)
+                refreshAvailableBackups()
+            }
         }
 
         // Coleta contínua de movimentação GPS em tempo real quando ativado pelo usuário
@@ -210,6 +231,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _gpsProviderInfo.value = "RASTREIO VIVO ATIVO • $speedStr $accStr"
                 }
             }
+        }
+    }
+
+    /**
+     * Dispara um Auto-Backup em segundo plano (com debounce de 2.5s) sempre que o usuário
+     * cadastra, edita ou altera dados importantes, mantendo no máximo 3 arquivos na pasta pública.
+     */
+    private fun scheduleAutoBackup() {
+        autoBackupJob?.cancel()
+        autoBackupJob = viewModelScope.launch {
+            delay(2500)
+            val res = backupManager.performRollingBackup(isAutoBackup = true)
+            if (res.isSuccess) {
+                _availableBackups.value = backupManager.listAvailableBackups()
+            }
+        }
+    }
+
+    fun refreshAvailableBackups() {
+        viewModelScope.launch {
+            _availableBackups.value = backupManager.listAvailableBackups()
+        }
+    }
+
+    fun triggerManualBackupNow() {
+        viewModelScope.launch {
+            _isBackupBusy.value = true
+            _backupStatusMessage.value = "Compactando e salvando backup na pasta Download/ResilienceHub_Backups..."
+            val result = backupManager.performRollingBackup(isAutoBackup = false)
+            _backupStatusMessage.value = result.message
+            _availableBackups.value = backupManager.listAvailableBackups()
+            _isBackupBusy.value = false
+        }
+    }
+
+    fun exportBackupToUri(targetUri: Uri) {
+        viewModelScope.launch {
+            _isBackupBusy.value = true
+            _backupStatusMessage.value = "Exportando arquivo de backup (.zip)..."
+            val result = backupManager.exportBackupToUri(targetUri)
+            _backupStatusMessage.value = result.message
+            _isBackupBusy.value = false
+        }
+    }
+
+    fun restoreLatestBackup() {
+        val latest = _availableBackups.value.firstOrNull()
+        if (latest != null) {
+            restoreFromSnapshot(latest)
+        } else {
+            _backupStatusMessage.value = "⚠ Nenhum backup automático encontrado na pasta. Use 'Importar Arquivo (.zip)' para selecionar um arquivo."
+        }
+    }
+
+    fun restoreFromSnapshot(snapshot: BackupManager.BackupSnapshotInfo) {
+        viewModelScope.launch {
+            _isBackupBusy.value = true
+            _backupStatusMessage.value = "Restaurando dados de ${snapshot.formattedDate}..."
+            val result = backupManager.restoreFromBackupFile(File(snapshot.filePath))
+            _familyDocuments.value = loadFamilyDocumentsFromDisk()
+            _backupStatusMessage.value = result.message
+            _isBackupBusy.value = false
+        }
+    }
+
+    fun restoreFromBackupUri(uri: Uri) {
+        viewModelScope.launch {
+            _isBackupBusy.value = true
+            _backupStatusMessage.value = "Restaurando backup a partir do arquivo selecionado..."
+            val result = backupManager.restoreFromBackupUri(uri)
+            _familyDocuments.value = loadFamilyDocumentsFromDisk()
+            _backupStatusMessage.value = result.message
+            _availableBackups.value = backupManager.listAvailableBackups()
+            _isBackupBusy.value = false
         }
     }
 
@@ -258,7 +353,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _ragModeAi,
             _pdfImportStatus,
             _chatMessages,
-            _familyDocuments
+            _familyDocuments,
+            _availableBackups,
+            _backupStatusMessage,
+            _isBackupBusy
         )
     ) { flowsArray: Array<Any?> ->
         @Suppress("UNCHECKED_CAST")
@@ -296,6 +394,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val chatMessages = flowsArray[25] as List<ChatMessage>
         @Suppress("UNCHECKED_CAST")
         val familyDocuments = flowsArray[26] as List<FamilyDocument>
+        @Suppress("UNCHECKED_CAST")
+        val availableBackups = flowsArray[27] as List<BackupManager.BackupSnapshotInfo>
+        val backupStatusMessage = flowsArray[28] as? String
+        val isBackupBusy = flowsArray[29] as Boolean
 
         // Filtragem do estoque
         val filteredItems = allItems.filter { item ->
@@ -347,7 +449,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ragResponse = ragResponse,
             isRagLoading = isRagLoading,
             ragModeAi = ragModeAi,
-            pdfImportStatus = pdfImportStatus
+            pdfImportStatus = pdfImportStatus,
+            availableBackups = availableBackups,
+            backupStatusMessage = backupStatusMessage,
+            isBackupBusy = isBackupBusy
         )
     }.stateIn(
         scope = viewModelScope,
@@ -448,7 +553,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // --- Chat IA RAG Operations (Base Oficial dos Órgãos Oficiais) ---
 
     fun importPdfFromUri(uri: Uri) {
-        // Caso seja chamado, redireciona para importação de documento familiar padrão
         importFamilyDocumentPdf(
             uri = uri,
             title = pdfRagManager.getFileNameFromUri(uri)?.removeSuffix(".pdf") ?: "Documento da Família",
@@ -559,6 +663,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     e.printStackTrace()
                 }
             }
+            scheduleAutoBackup()
         }
     }
 
@@ -573,6 +678,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 saveFamilyDocumentsToDisk(updated)
                 _familyDocuments.value = updated
             }
+            scheduleAutoBackup()
         }
     }
 
@@ -649,12 +755,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val item = uiState.value.allRegisteredItems.find { it.id == itemId } ?: return@launch
             val newQty = (item.quantity + delta).coerceAtLeast(0.0)
             repository.updateQuantity(itemId, newQty)
+            scheduleAutoBackup()
         }
     }
 
     fun registerBatteryMaintenance(itemId: Long) {
         viewModelScope.launch {
             repository.registerMaintenance(itemId, System.currentTimeMillis())
+            scheduleAutoBackup()
         }
     }
 
@@ -667,6 +775,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val newExp = System.currentTimeMillis() + (extendDays.toLong() * 24 * 3600 * 1000)
             val updated = item.copy(expirationDate = newExp)
             repository.updateItem(updated)
+            scheduleAutoBackup()
         }
     }
 
@@ -675,6 +784,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val item = uiState.value.allRegisteredItems.find { it.id == itemId } ?: return@launch
             val newExp = monthYearToExpirationTimestamp(month, year)
             repository.updateItem(item.copy(expirationDate = newExp))
+            scheduleAutoBackup()
         }
     }
 
@@ -706,6 +816,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     alertDaysBefore = 90
                 )
             )
+            scheduleAutoBackup()
         }
     }
 
@@ -736,12 +847,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     alertDaysBefore = 90
                 )
             )
+            scheduleAutoBackup()
         }
     }
 
     fun deleteItem(itemId: Long) {
         viewModelScope.launch {
             repository.deleteItemById(itemId)
+            scheduleAutoBackup()
         }
     }
 
@@ -770,6 +883,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     medications = medications
                 )
             )
+            scheduleAutoBackup()
         }
     }
 
@@ -797,12 +911,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     medications = medications.trim().ifBlank { "Nenhuma de uso contínuo" }
                 )
             )
+            scheduleAutoBackup()
         }
     }
 
     fun deleteProfile(profileId: Long) {
         viewModelScope.launch {
             repository.deleteProfileById(profileId)
+            scheduleAutoBackup()
         }
     }
 
@@ -831,12 +947,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     phone = phone
                 )
             )
+            scheduleAutoBackup()
         }
     }
 
     fun deletePoi(poiId: Long) {
         viewModelScope.launch {
             repository.deletePoiById(poiId)
+            scheduleAutoBackup()
         }
     }
 
@@ -862,6 +980,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
             _pdfImportStatus.value = "✓ Protocolo \"${docTitle.trim()}\" adicionado à Base de Conhecimento da IA!"
+            scheduleAutoBackup()
         }
     }
 
