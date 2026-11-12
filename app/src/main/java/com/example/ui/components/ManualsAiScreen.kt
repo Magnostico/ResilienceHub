@@ -228,7 +228,10 @@ fun ManualsAiScreen(
                 items(state.chatMessages, key = { it.id }) { msg ->
                     ChatMessageBubble(
                         message = msg,
-                        crisisMode = crisisMode
+                        crisisMode = crisisMode,
+                        onConfirmFreeTopic = { query -> viewModel.confirmFreeTopicQuestion(query) },
+                        onRejectFreeTopic = { viewModel.rejectFreeTopicQuestion() },
+                        onRequestMoreDetails = { query, isFree -> viewModel.requestMoreDetailsOnTopic(query, isFree) }
                     )
                 }
 
@@ -519,7 +522,10 @@ fun ManualsAiScreen(
 @Composable
 private fun ChatMessageBubble(
     message: ChatMessage,
-    crisisMode: Boolean
+    crisisMode: Boolean,
+    onConfirmFreeTopic: (String) -> Unit,
+    onRejectFreeTopic: () -> Unit,
+    onRequestMoreDetails: (String, Boolean) -> Unit
 ) {
     var showSources by remember { mutableStateOf(false) }
 
@@ -541,7 +547,12 @@ private fun ChatMessageBubble(
             ),
             border = BorderStroke(
                 1.dp,
-                if (message.isUser) Color(0xFFFBBF24) else Color(0xFF10B981)
+                when {
+                    message.isUser -> Color(0xFFFBBF24)
+                    message.requiresFreeTopicConfirmation -> Color(0xFF38BDF8)
+                    message.isFreeTopic -> Color(0xFFA855F7)
+                    else -> Color(0xFF10B981)
+                }
             ),
             modifier = Modifier.widthIn(max = 340.dp)
         ) {
@@ -554,17 +565,33 @@ private fun ChatMessageBubble(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = if (message.isUser) Icons.Default.Person else Icons.Default.Shield,
+                            imageVector = when {
+                                message.isUser -> Icons.Default.Person
+                                message.isFreeTopic -> Icons.Default.AutoAwesome
+                                else -> Icons.Default.Shield
+                            },
                             contentDescription = null,
-                            tint = if (message.isUser) Color(0xFF090D16) else Color(0xFF34D399),
+                            tint = when {
+                                message.isUser -> Color(0xFF090D16)
+                                message.isFreeTopic -> Color(0xFFC084FC)
+                                else -> Color(0xFF34D399)
+                            },
                             modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(5.dp))
                         Text(
-                            text = if (message.isUser) "Você" else "IA Defesa Civil & Sobrevivência",
+                            text = when {
+                                message.isUser -> "Você"
+                                message.isFreeTopic -> "IA Modo Tema Livre"
+                                else -> "IA Defesa Civil & Sobrevivência"
+                            },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = if (message.isUser) Color(0xFF090D16) else Color(0xFF34D399)
+                            color = when {
+                                message.isUser -> Color(0xFF090D16)
+                                message.isFreeTopic -> Color(0xFFC084FC)
+                                else -> Color(0xFF34D399)
+                            }
                         )
                     }
 
@@ -586,6 +613,73 @@ private fun ChatMessageBubble(
                     fontWeight = if (message.isUser) FontWeight.Bold else FontWeight.Medium,
                     color = if (message.isUser) Color(0xFF090D16) else Color.White
                 )
+
+                // Portão de Confirmação para Tema Livre (Fora do Escopo de Sobrevivência)
+                if (!message.isUser && message.requiresFreeTopicConfirmation && !message.pendingFreeTopicQuery.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Button(
+                            onClick = { onConfirmFreeTopic(message.pendingFreeTopicQuery) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF10B981),
+                                contentColor = Color(0xFF090D16)
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = "✅ Sim, responder",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = onRejectFreeTopic,
+                            border = BorderStroke(1.dp, Color(0xFF64748B)),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = "❌ Não, manter foco",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE2E8F0)
+                            )
+                        }
+                    }
+                }
+
+                // Botão de 1 toque para expandir detalhes sob demanda
+                if (!message.isUser && message.canExpandDetails && !message.topicQueryForExpansion.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { onRequestMoreDetails(message.topicQueryForExpansion, message.isFreeTopic) },
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color(0xFF0F172A)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(30.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ZoomIn,
+                            contentDescription = null,
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Quero mais detalhes",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF38BDF8)
+                        )
+                    }
+                }
 
                 // Fontes oficiais consultadas pelo RAG
                 if (!message.isUser && message.citedSources.isNotEmpty()) {

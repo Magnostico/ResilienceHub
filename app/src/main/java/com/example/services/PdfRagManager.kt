@@ -15,15 +15,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.text.Normalizer
+import java.util.Locale
 
 /**
- * Motor RAG Conversacional 100% Offline:
- * - Consulta a Base Oficial de Sobrevivência (Defesa Civil, OMS, Ministério da Saúde, Cruz Vermelha/CICV, FEMA, CNEN, CBMERJ).
- * - Expansão semântica de sinônimos de emergência para compreender perguntas em linguagem natural de chat.
- * - Modo IA Local (MediaPipe Gemma LLM) + Motor Conversacional Estruturado Offline (Zero Alucinação).
- * - Suporte a leitura e extração de Receitas Médicas e Documentos da Família em PDF.
+ * Motor Conversacional Híbrido (RAG Oficial de Sobrevivência + Modo Tema Livre com Confirmação):
+ * - Respostas naturais e sucintas por padrão (com opção de aprofundamento sob demanda).
+ * - Base principal fundamentada nos 30 protocolos dos Órgãos Oficiais + dados reais do estoque/família do usuário.
+ * - Detecção de perguntas fora do escopo (Tema Livre): pergunta antes ao usuário se ele deseja sair do escopo
+ *   e, mediante confirmação ("Sim"), responde livremente usando a capacidade do modelo.
  */
 class PdfRagManager(
     private val context: Context,
@@ -35,9 +40,10 @@ class PdfRagManager(
         const val CHUNK_TARGET_SIZE = 500
         const val CHUNK_OVERLAP = 50
 
+        // Mantido com as expressões-chave exigidas pelos testes unitários
         const val STRICT_RAG_SYSTEM_PROMPT_TEMPLATE =
             "Você é um assistente de emergência civil offline. " +
-            "Responda APENAS com base nas cartilhas oficiais abaixo, de forma direta, conversacional e em tópicos:\n\n"
+            "Responda APENAS com base nas cartilhas oficiais abaixo, de forma direta, natural, sucinta e em tópicos:\n\n"
     }
 
     init {
@@ -61,17 +67,17 @@ class PdfRagManager(
         val promptBuilt: String,
         val answer: String,
         val citedSources: List<ManualChunkFtsEntity>,
-        val executionMode: String
+        val executionMode: String,
+        val requiresFreeTopicConfirmation: Boolean = false,
+        val pendingFreeTopicQuery: String? = null,
+        val canExpandDetails: Boolean = false,
+        val topicQueryForExpansion: String? = null
     )
 
     // =========================================================================
     // 1. EXTRAÇÃO DE PDF PARA DOCUMENTOS E RECEITAS DA FAMÍLIA
     // =========================================================================
 
-    /**
-     * Extrai a quantidade de páginas e o texto completo de um PDF de Receita Médica ou Documento Familiar
-     * salvo no armazenamento interno para consulta rápida offline.
-     */
     suspend fun extractFamilyPdfPreview(pdfFile: File): Pair<Int, String> = withContext(Dispatchers.IO) {
         var document: PDDocument? = null
         try {
@@ -85,11 +91,11 @@ class PdfRagManager(
             val cleanText = rawText.replace(Regex("\\s+"), " ").take(2000)
             Pair(
                 totalPages,
-                cleanText.ifBlank { "Documento PDF digitalizado ($totalPages página(s)). Toque em 'Abrir PDF' para visualizar as páginas." }
+                cleanText.ifBlank { "Documento PDF digitalizado ($totalPages página(s)). Toque em 'Abrir' para visualizar as páginas." }
             )
         } catch (e: Exception) {
-            Log.w(TAG, "Não foi possível extrair texto do PDF familiar (pode ser imagem escaneada)", e)
-            Pair(1, "Documento PDF armazenado offline. Toque em 'Abrir PDF' para visualizar.")
+            Log.w(TAG, "Não foi possível extrair texto do PDF familiar", e)
+            Pair(1, "Documento PDF armazenado offline. Toque em 'Abrir' para visualizar.")
         } finally {
             try {
                 document?.close()
@@ -98,9 +104,6 @@ class PdfRagManager(
         }
     }
 
-    /**
-     * Mantido para compatibilidade caso um PDF externo seja indexado no FTS4.
-     */
     suspend fun ingestPdf(
         pdfUri: Uri,
         category: String = "DEFESA_CIVIL"
@@ -169,19 +172,16 @@ class PdfRagManager(
         var start = 0
         while (start < cleanText.length) {
             var end = minOf(start + targetSize, cleanText.length)
-
             if (end < cleanText.length) {
                 val lastPeriod = cleanText.lastIndexOf('.', end)
                 if (lastPeriod > start + (targetSize / 2)) {
                     end = lastPeriod + 1
                 }
             }
-
             val chunk = cleanText.substring(start, end).trim()
             if (chunk.isNotBlank()) {
                 chunks.add(chunk)
             }
-
             start = if (end >= cleanText.length) cleanText.length else maxOf(end - overlap, start + 1)
         }
         return chunks
@@ -205,7 +205,7 @@ class PdfRagManager(
     }
 
     // =========================================================================
-    // 2. BUSCA INTELIGENTE COM EXPANSÃO SEMÂNTICA PARA CHAT DE SOBREVIVÊNCIA
+    // 2. CLASSIFICAÇÃO DE ESCOPO, NATURALIDADE E SUCINTUDE
     // =========================================================================
 
     private val stopWords = setOf(
@@ -213,13 +213,16 @@ class PdfRagManager(
         "dos", "das", "por", "uma", "uns", "umas", "isso", "este", "esta",
         "onde", "quando", "porque", "deve", "devo", "fazer", "usar", "tem",
         "sao", "meu", "minha", "meus", "minhas", "estao", "esta", "estou",
-        "pode", "posso", "ajuda", "socorro", "faco", "caso", "tipo", "sobre"
+        "pode", "posso", "ajuda", "socorro", "faco", "caso", "tipo", "sobre",
+        "mais", "menos", "muito", "pouco", "quero", "queria", "saber", "diga",
+        "fale", "explique", "explica", "favor", "voce", "seria", "bom", "boa"
     )
 
-    /**
-     * Mapa de expansão semântica: conecta termos coloquiais do usuário aos conceitos técnicos
-     * das diretrizes oficiais (Defesa Civil, OMS, CICV, FEMA, Ministério da Saúde).
-     */
+    private val detailRequestKeywords = listOf(
+        "detalh", "complet", "aprofund", "passo a passo", "tudo sobre",
+        "mais informac", "explica melhor", "explique melhor", "mais sobre"
+    )
+
     private val semanticSynonyms: Map<String, List<String>> = mapOf(
         "agua" to listOf("hipoclorito", "clorin", "fervura", "purificacao", "potavel", "filtrar", "sede", "chuva"),
         "beber" to listOf("agua", "hipoclorito", "clorin", "fervura", "potavel", "hidratacao"),
@@ -235,6 +238,7 @@ class PdfRagManager(
         "sangue" to listOf("hemorragia", "torniquete", "compressao", "sangramento", "arterial", "march", "ferida"),
         "sangrando" to listOf("hemorragia", "torniquete", "compressao", "arterial", "corte"),
         "corte" to listOf("hemorragia", "ferida", "infeccao", "torniquete", "antisseptico", "irrigacao"),
+        "ferida" to listOf("corte", "infeccao", "irrigacao", "antisseptico", "hemorragia", "curativo"),
         "torniquete" to listOf("hemorragia", "cat", "molinete", "sangramento", "march"),
         "engasgo" to listOf("engasgou", "heimlich", "asfixia", "bebe", "tapas nas costas", "obstrucao"),
         "engasgou" to listOf("engasgo", "heimlich", "asfixia", "bebe", "tapas nas costas"),
@@ -249,10 +253,12 @@ class PdfRagManager(
         "soro" to listOf("soro caseiro", "sro", "desidratacao", "sal", "acucar"),
         "osso" to listOf("fratura", "tala", "imobilizacao", "coluna", "quebrou"),
         "quebrou" to listOf("fratura", "tala", "imobilizacao"),
+        "fratura" to listOf("osso", "tala", "imobilizacao", "coluna"),
         "frio" to listOf("hipotermia", "manta termica", "molhadas", "tremores"),
         "calor" to listOf("insolacao", "exaustao termica", "sombra", "hidratacao"),
         "cobra" to listOf("peconhentos", "serpente", "escorpiao", "aranha", "veneno", "picada", "butantan"),
         "escorpiao" to listOf("peconhentos", "picada", "compressas mornas", "veneno", "butantan"),
+        "aranha" to listOf("peconhentos", "picada", "veneno", "butantan"),
         "picada" to listOf("peconhentos", "cobra", "escorpiao", "aranha", "alergia", "anafilaxia"),
         "enchente" to listOf("inundacao", "alagamento", "enxurrada", "leptospirose", "disjuntor"),
         "alagamento" to listOf("enchente", "inundacao", "enxurrada", "leptospirose"),
@@ -262,24 +268,29 @@ class PdfRagManager(
         "terremoto" to listOf("abalo", "escombros", "desabamento", "soterramento", "apito"),
         "escombros" to listOf("terremoto", "desabamento", "apito", "poeira", "soterrado"),
         "apagao" to listOf("blackout", "energia", "geladeira", "gerador", "monoxido", "lanterna"),
-        "energia" to listOf("apagao", "blackout", "bateria", "solar", "faraday", "emp"),
+        "blackout" to listOf("apagao", "energia", "geladeira", "monoxido"),
         "emp" to listOf("pulso eletromagnetico", "faraday", "papel-aluminio", "tempestade solar"),
         "faraday" to listOf("pulso eletromagnetico", "emp", "papel-aluminio", "eletronicos"),
         "banheiro" to listOf("saneamento", "esgoto", "dois baldes", "fezes", "urina", "colera"),
         "esgoto" to listOf("saneamento", "banheiro seco", "dois baldes", "vaso sanitario"),
         "comida" to listOf("alimentos", "geladeira", "latas", "botulismo", "racionamento", "fefo"),
-        "fome" to listOf("alimentos", "racionamento", "calorico", "comida"),
+        "alimento" to listOf("comida", "geladeira", "latas", "botulismo", "racionamento"),
         "incendio" to listOf("fogo", "fumaca", "porta quente", "rasteje", "bombeiros"),
         "fumaca" to listOf("incendio", "rasteje", "porta", "toalhas molhadas", "gas"),
         "mochila" to listOf("72 horas", "bugout", "evacuacao", "kit", "emergencia"),
         "evacuacao" to listOf("mochila", "72 horas", "ponto de encontro", "disjuntor", "fuga"),
         "radio" to listOf("ondas curtas", "comunicacoes", "morse", "sos", "sinais terra-ar"),
         "medo" to listOf("panico", "psicologicos", "respiracao", "criancas", "calma"),
-        "panico" to listOf("psicologicos", "respiracao 4-4-4-4", "criancas", "ansiedade")
+        "panico" to listOf("psicologicos", "respiracao 4-4-4-4", "criancas", "ansiedade"),
+        "convulsao" to listOf("epileptico", "crises medicas", "posicao lateral"),
+        "asma" to listOf("falta de ar", "bombinha", "salbutamol", "crises medicas"),
+        "infarto" to listOf("peito", "aas", "coracao", "crises medicas"),
+        "catastrofe" to listOf("regra dos tres", "evacuacao", "mochila", "emergencia"),
+        "sobrevivencia" to listOf("regra dos tres", "mochila", "agua", "abrigo")
     )
 
-    private fun normalizeAccents(input: String): String {
-        val temp = Normalizer.normalize(input.lowercase(), Normalizer.Form.NFD)
+    fun normalizeAccents(input: String): String {
+        val temp = Normalizer.normalize(input.lowercase(Locale.getDefault()), Normalizer.Form.NFD)
         return Regex("\\p{InCombiningDiacriticalMarks}+").replace(temp, "")
     }
 
@@ -290,25 +301,100 @@ class PdfRagManager(
         return if (filtered.isNotEmpty()) filtered else tokens
     }
 
-    private fun expandQueryKeywords(rawKeywords: List<String>): List< Pair<String, Int> > {
+    fun isUserAskingForMoreDetails(query: String): Boolean {
+        val norm = normalizeAccents(query)
+        return detailRequestKeywords.any { norm.contains(it) }
+    }
+
+    fun isAffirmativeConfirmation(input: String): Boolean {
+        val norm = normalizeAccents(input).trim()
+        val exactConfirmations = setOf(
+            "sim", "s", "quero", "pode", "claro", "com certeza", "por favor",
+            "pode responder", "quero sim", "responde", "responda", "manda",
+            "ok", "beleza", "vamos", "bora", "autorizo", "afirmativo", "isso"
+        )
+        return norm in exactConfirmations ||
+            norm.startsWith("sim ") ||
+            norm.startsWith("pode ") ||
+            norm.startsWith("quero ")
+    }
+
+    fun isNegativeConfirmation(input: String): Boolean {
+        val norm = normalizeAccents(input).trim()
+        val exactNegatives = setOf(
+            "nao", "n", "nao quero", "deixa", "esquece", "cancelar", "voltar"
+        )
+        return norm in exactNegatives || norm.startsWith("nao ")
+    }
+
+    private fun checkGreetingOrSmallTalk(query: String): String? {
+        val norm = normalizeAccents(query).replace(Regex("[^a-z0-9\\s]"), "").trim()
+        return when {
+            norm in setOf("oi", "ola", "opa", "bom dia", "boa tarde", "boa noite", "e ai", "tudo bem", "oi tudo bem", "ola tudo bem") ->
+                "Olá! Tudo ótimo por aqui. Estou pronto para ajudar você e sua família com orientações rápidas de sobrevivência, primeiros socorros, estoque ou qualquer dúvida que surgir. O que você precisa agora?"
+
+            norm in setOf("obrigado", "obrigada", "valeu", "muito obrigado", "show", "perfeito", "entendi") ->
+                "Por nada! Sempre que precisar consultar um procedimento rápido ou tirar outra dúvida, é só chamar."
+
+            norm.contains("quem e voce") || norm.contains("o que voce faz") || norm.contains("como voce funciona") ->
+                "Sou o assistente da sua família no ResilienceHub. Minha base principal reúne 30 diretrizes oficiais (Defesa Civil, OMS, Ministério da Saúde, Cruz Vermelha e FEMA), além dos dados do seu estoque e família. Respondo de forma direta e sucinta, dou detalhes quando você pedir e, se quiser conversar sobre algum tema livre fora de sobrevivência, basta me confirmar!"
+
+            else -> null
+        }
+    }
+
+    /**
+     * Verifica se o usuário está perguntando diretamente sobre os dados cadastrados no próprio app
+     * (seu estoque atual, água armazenada, membros da família ou pontos de encontro).
+     */
+    private suspend fun checkPersonalAppDatabaseQuery(query: String): String? {
+        val norm = normalizeAccents(query)
+        val asksAboutMyStock = (norm.contains("meu estoque") || norm.contains("meus itens") ||
+            norm.contains("quantos litros") || norm.contains("minha agua") ||
+            norm.contains("vencendo") || norm.contains("tenho cadastrado"))
+        val asksAboutMyFamily = (norm.contains("minha familia") || norm.contains("meus familiares") ||
+            norm.contains("alergia") && (norm.contains("familia") || norm.contains("quem")))
+
+        if (!asksAboutMyStock && !asksAboutMyFamily) return null
+
+        val items = database.inventoryDao().getAllItems().first()
+        val profiles = database.familyProfileDao().getAllProfiles().first()
+
+        return if (asksAboutMyStock) {
+            if (items.isEmpty()) {
+                "No momento você ainda não tem itens cadastrados no estoque. Você pode adicioná-los na aba **Estoque**."
+            } else {
+                val totalWaterL = items.filter { it.category.name == "WATER" && it.unit.equals("L", true) }.sumOf { it.quantity }
+                val sampleNames = items.take(5).joinToString(", ") { "${it.name} (${it.quantity.toInt()} ${it.unit})" }
+                "Hoje você tem **${items.size} item(ns)** cadastrados no estoque (incluindo **${totalWaterL.toInt()} L de água**). Alguns dos seus itens: $sampleNames. Quer que eu avalie como usar ou conservar algum deles?"
+            }
+        } else {
+            if (profiles.isEmpty()) {
+                "Você ainda não cadastrou membros na aba **Família**."
+            } else {
+                val summary = profiles.joinToString("; ") { "${it.name} (Sangue ${it.bloodType}, ${it.weightKg.toInt()}kg, Alergias: ${it.allergies})" }
+                "Sua família cadastrada conta com **${profiles.size} pessoa(s)**: $summary."
+            }
+        }
+    }
+
+    private fun expandQueryKeywords(rawKeywords: List<String>): List<Pair<String, Int>> {
         val weightedTerms = mutableMapOf<String, Int>()
         for (kw in rawKeywords) {
             val norm = normalizeAccents(kw)
-            if (norm.isBlank()) continue
-            weightedTerms[norm] = maxOf(weightedTerms[norm] ?: 0, 12)
+            if (norm.isBlank() || norm in stopWords) continue
+            weightedTerms[norm] = maxOf(weightedTerms[norm] ?: 0, 14)
 
-            // Adiciona radical (prefixo de 4 letras) para casar plurais e conjugações
             if (norm.length >= 5) {
                 val stem = norm.take(5)
                 weightedTerms[stem] = maxOf(weightedTerms[stem] ?: 0, 6)
             }
 
-            // Expansão de sinônimos de emergência
             semanticSynonyms.forEach { (trigger, synonyms) ->
-                if (norm.contains(trigger) || trigger.contains(norm)) {
+                if (norm == trigger || (norm.length >= 4 && (norm.contains(trigger) || trigger.contains(norm)))) {
                     for (syn in synonyms) {
                         val normSyn = normalizeAccents(syn)
-                        weightedTerms[normSyn] = maxOf(weightedTerms[normSyn] ?: 0, 8)
+                        weightedTerms[normSyn] = maxOf(weightedTerms[normSyn] ?: 0, 9)
                     }
                 }
             }
@@ -316,9 +402,6 @@ class PdfRagManager(
         return weightedTerms.entries.map { it.key to it.value }
     }
 
-    /**
-     * Modo Rápido FTS4.
-     */
     fun searchFastFts(query: String): Flow<List<ManualChunkFtsEntity>> {
         val keywords = extractKeywords(query)
         return if (keywords.isEmpty()) {
@@ -330,28 +413,56 @@ class PdfRagManager(
     }
 
     /**
-     * Motor Conversacional RAG sobre a Base Oficial de Sobrevivência.
-     * Recupera os protocolos oficiais mais relevantes, constrói o contexto verificado
-     * e gera uma resposta conversacional detalhada citando os órgãos oficiais.
+     * Consulta principal do Chat:
+     * 1) Responde saudações e perguntas sobre o estoque/família com naturalidade.
+     * 2) Verifica se a pergunta pertence ao escopo de sobrevivência/emergência/proteção familiar.
+     * 3) Se estiver no escopo: responde de forma natural e sucinta (ou detalhada se `forceDetailed = true` ou pedido pelo usuário).
+     * 4) Se estiver FORA do escopo: pergunta educadamente se o usuário quer falar sobre esse tema livre antes de responder.
      */
     suspend fun searchLocalAiRag(
         query: String,
-        customModelPath: String? = null
+        customModelPath: String? = null,
+        forceDetailed: Boolean = false
     ): RagResponse = withContext(Dispatchers.IO) {
-        val rawKeywords = extractKeywords(query)
+        val cleanQuery = query.trim()
+
+        // 1. Saudação ou conversa rápida natural
+        checkGreetingOrSmallTalk(cleanQuery)?.let { greetingReply ->
+            return@withContext RagResponse(
+                query = cleanQuery,
+                promptBuilt = cleanQuery,
+                answer = greetingReply,
+                citedSources = emptyList(),
+                executionMode = "ASSISTENTE NATURAL"
+            )
+        }
+
+        // 2. Consulta direta aos dados cadastrados pelo próprio usuário no app
+        checkPersonalAppDatabaseQuery(cleanQuery)?.let { personalReply ->
+            return@withContext RagResponse(
+                query = cleanQuery,
+                promptBuilt = cleanQuery,
+                answer = personalReply,
+                citedSources = emptyList(),
+                executionMode = "DADOS DO SEU APP"
+            )
+        }
+
+        // 3. Verifica se o usuário pediu detalhes já na própria frase
+        val wantsDetails = forceDetailed || isUserAskingForMoreDetails(cleanQuery)
+
+        val rawKeywords = extractKeywords(cleanQuery)
         val expandedTerms = expandQueryKeywords(rawKeywords)
 
         var allChunks = database.manualChunkDao().getAllChunks().first()
         if (allChunks.size < OfficialSurvivalKnowledgeBase.MIN_EXPECTED_OFFICIAL_CHUNKS) {
-            // Garantia extra de que a base oficial está carregada
             val official = OfficialSurvivalKnowledgeBase.getOfficialChunks()
             database.manualChunkDao().insertAll(official)
             allChunks = database.manualChunkDao().getAllChunks().first()
         }
 
-        // Pontuação híbrida (Termos diretos + Sinônimos Semânticos + Título + Categoria)
         val scoredChunks = if (expandedTerms.isEmpty()) {
-            allChunks.take(4)
+            emptyList()
         } else {
             allChunks.map { chunk ->
                 val normContent = normalizeAccents(chunk.contentText)
@@ -359,54 +470,374 @@ class PdfRagManager(
                 val normCat = normalizeAccents(chunk.category)
                 var score = 0
                 for ((term, weight) in expandedTerms) {
-                    if (normTitle.contains(term)) score += (weight * 2)
-                    if (normContent.contains(term)) score += weight
+                    // Exige casamento de palavra ou prefixo significativo para não ativar falsos positivos
+                    val wordRegex = Regex("\\b${Regex.escape(term)}")
+                    if (wordRegex.containsMatchIn(normTitle)) score += (weight * 2)
+                    if (wordRegex.containsMatchIn(normContent)) score += weight
                     if (normCat.contains(term)) score += (weight / 2)
                 }
                 Pair(chunk, score)
             }
-                .filter { it.second > 0 }
+                .filter { it.second >= 12 } // Limiar mínimo de relevância real no escopo de sobrevivência
                 .sortedByDescending { it.second }
-                .map { it.first }
         }
 
-        // Seleciona até 3 diretrizes oficiais mais relevantes (ou visão geral se a pergunta for ampla)
-        val topChunks = if (scoredChunks.isNotEmpty()) {
-            scoredChunks.take(3)
+        // 4. SE NÃO HÁ CORRESPONDÊNCIA NO ESCOPO DE SOBREVIVÊNCIA -> QUESTIONA SE QUER TEMA LIVRE!
+        if (scoredChunks.isEmpty()) {
+            val confirmText = "Notei que sua pergunta (**\"$cleanQuery\"**) está fora do meu escopo principal de sobrevivência, saúde de emergência e proteção da família.\n\n" +
+                "Você quer que eu responda sobre esse assunto de **tema livre** mesmo assim?"
+            return@withContext RagResponse(
+                query = cleanQuery,
+                promptBuilt = cleanQuery,
+                answer = confirmText,
+                citedSources = emptyList(),
+                executionMode = "CONFIRMAÇÃO DE TEMA LIVRE",
+                requiresFreeTopicConfirmation = true,
+                pendingFreeTopicQuery = cleanQuery
+            )
+        }
+
+        // 5. ESTÁ NO ESCOPO OFICIAL DE SOBREVIVÊNCIA!
+        val topChunks = if (wantsDetails) {
+            scoredChunks.take(3).map { it.first }
         } else {
-            // Se o usuário mandou uma saudação ou pergunta genérica ("o que fazer em uma catástrofe?"),
-            // traz Regra dos Três, Kit 72h e Purificação de Água
-            allChunks.filter { it.rowId in listOf(4, 3, 1, 5) }.take(3)
+            scoredChunks.take(2).map { it.first }
         }
 
         val contextBuilder = StringBuilder()
-        contextBuilder.append("[DIRETRIZES OFICIAIS RECUPERADAS DO BANCO LOCAL]\n")
         topChunks.forEachIndexed { index, chunk ->
-            contextBuilder.append("Fonte Oficial ${index + 1} (${chunk.docTitle} - Cat: ${chunk.category}):\n")
-            contextBuilder.append("\"${chunk.contentText}\"\n\n")
+            contextBuilder.append("Fonte ${index + 1} (${chunk.docTitle}): ${chunk.contentText}\n\n")
+        }
+
+        val styleInstruction = if (wantsDetails) {
+            "O usuário pediu informações DETALHADAS. Explique passo a passo todos os detalhes, dosagens e cuidados com naturalidade."
+        } else {
+            "Responda com naturalidade e de forma SUCINTA (máximo de 3 a 4 pontos curtos e diretos com o essencial)."
         }
 
         val fullPrompt = buildString {
             append(STRICT_RAG_SYSTEM_PROMPT_TEMPLATE)
+            append(styleInstruction).append("\n\n")
             append(contextBuilder.toString())
-            append("[MENSAGEM DO CIDADÃO NO CHAT]\n")
-            append(query)
-            append("\n\n[RESPOSTA ESTRUTURADA PASSO A PASSO]:\n")
+            append("Pergunta: ").append(cleanQuery).append("\nResposta:\n")
         }
 
-        val answer = executeRagInference(fullPrompt, query, topChunks, customModelPath)
+        val (answerText, modeLabel) = executeInScopeInference(
+            prompt = fullPrompt,
+            query = cleanQuery,
+            sources = topChunks,
+            wantsDetails = wantsDetails,
+            modelPath = customModelPath
+        )
 
         RagResponse(
-            query = query,
+            query = cleanQuery,
             promptBuilt = fullPrompt,
-            answer = answer.first,
+            answer = answerText,
             citedSources = topChunks,
-            executionMode = answer.second
+            executionMode = modeLabel,
+            requiresFreeTopicConfirmation = false,
+            canExpandDetails = !wantsDetails,
+            topicQueryForExpansion = cleanQuery
         )
     }
 
+    /**
+     * Executado quando o usuário confirma ("Sim") que deseja que a IA responda a uma pergunta
+     * fora do escopo de sobrevivência (Tema Livre), utilizando toda a capacidade do modelo.
+     */
+    suspend fun answerFreeTopicQuestion(
+        freeQuery: String,
+        detailed: Boolean = false,
+        customModelPath: String? = null
+    ): RagResponse = withContext(Dispatchers.IO) {
+        val wantsDetails = detailed || isUserAskingForMoreDetails(freeQuery)
+
+        val freePrompt = if (wantsDetails) {
+            "Você é um assistente inteligente, natural e prestativo. Responda em português de forma completa, clara e bem explicada à seguinte pergunta do usuário:\n\nPergunta: $freeQuery\n\nResposta:"
+        } else {
+            "Você é um assistente inteligente, natural e prestativo. Responda em português com naturalidade e de forma sucinta e direta (3 a 5 frases claras) à seguinte pergunta do usuário:\n\nPergunta: $freeQuery\n\nResposta:"
+        }
+
+        // Camada 1: Se o modelo LLM local MediaPipe Gemma (.task / .bin) estiver carregado no aparelho
+        val modelFile = findLocalModelFile(customModelPath)
+        if (modelFile != null && modelFile.exists()) {
+            try {
+                val llm = getOrCreateLlmInference(modelFile, isFreeTopic = true)
+                val llmAnswer = llm.generateResponse(freePrompt).trim()
+                if (llmAnswer.isNotBlank()) {
+                    return@withContext RagResponse(
+                        query = freeQuery,
+                        promptBuilt = freePrompt,
+                        answer = llmAnswer,
+                        citedSources = emptyList(),
+                        executionMode = "TEMA LIVRE • IA LOCAL (${modelFile.name})",
+                        canExpandDetails = !wantsDetails,
+                        topicQueryForExpansion = freeQuery
+                    )
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Falha no modelo local em tema livre, tentando síntese aberta", t)
+            }
+        }
+
+        // Camada 2: Capacidade de Modelo Aberto (se houver conexão disponível no momento)
+        val cloudModelAnswer = tryOpenDomainModelInference(freeQuery, wantsDetails)
+        if (!cloudModelAnswer.isNullOrBlank()) {
+            return@withContext RagResponse(
+                query = freeQuery,
+                promptBuilt = freePrompt,
+                answer = cloudModelAnswer,
+                citedSources = emptyList(),
+                executionMode = "TEMA LIVRE • IA ABERTA",
+                canExpandDetails = !wantsDetails,
+                topicQueryForExpansion = freeQuery
+            )
+        }
+
+        // Camada 3: Fallback Enciclopédico / Raciocínio Geral 100% Offline
+        val offlineFreeAnswer = generateOfflineFreeTopicFallback(freeQuery, wantsDetails)
+        RagResponse(
+            query = freeQuery,
+            promptBuilt = freePrompt,
+            answer = offlineFreeAnswer,
+            citedSources = emptyList(),
+            executionMode = "TEMA LIVRE • MODO OFFLINE",
+            canExpandDetails = !wantsDetails,
+            topicQueryForExpansion = freeQuery
+        )
+    }
+
+    // =========================================================================
+    // 3. MOTORES DE RESPOSTA NATURAL (SUCINTA vs DETALHADA E TEMA LIVRE)
+    // =========================================================================
+
     private var cachedLlmInference: LlmInference? = null
     private var cachedModelPath: String? = null
+
+    private fun getOrCreateLlmInference(modelFile: File, isFreeTopic: Boolean): LlmInference {
+        if (cachedLlmInference != null && cachedModelPath == modelFile.absolutePath) {
+            return cachedLlmInference!!
+        }
+        val options = LlmInference.LlmInferenceOptions.builder()
+            .setModelPath(modelFile.absolutePath)
+            .setMaxTokens(if (isFreeTopic) 600 else 512)
+            .setTemperature(if (isFreeTopic) 0.5f else 0.2f)
+            .setTopK(if (isFreeTopic) 20 else 5)
+            .build()
+        return LlmInference.createFromOptions(context, options).also {
+            cachedLlmInference = it
+            cachedModelPath = modelFile.absolutePath
+        }
+    }
+
+    private fun executeInScopeInference(
+        prompt: String,
+        query: String,
+        sources: List<ManualChunkFtsEntity>,
+        wantsDetails: Boolean,
+        modelPath: String?
+    ): Pair<String, String> {
+        val modelFile = findLocalModelFile(modelPath)
+
+        if (modelFile != null && modelFile.exists()) {
+            return try {
+                val llm = getOrCreateLlmInference(modelFile, isFreeTopic = false)
+                val response = llm.generateResponse(prompt).trim()
+                Pair(response, "IA LOCAL GEMMA (${modelFile.name})")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Alternando para síntese natural sobre base oficial", t)
+                naturalOfficialSynthesis(query, sources, wantsDetails)
+            }
+        } else {
+            return naturalOfficialSynthesis(query, sources, wantsDetails)
+        }
+    }
+
+    /**
+     * Gera respostas naturais, fluidas e humanas a partir da Base Oficial de Sobrevivência:
+     * - Por padrão (`wantsDetails == false`): resposta curta, direta e conversacional (3 a 4 pontos essenciais).
+     * - Quando solicitado (`wantsDetails == true`): explicação aprofundada e completa com todos os passos e alertas.
+     */
+    private fun naturalOfficialSynthesis(
+        query: String,
+        sources: List<ManualChunkFtsEntity>,
+        wantsDetails: Boolean
+    ): Pair<String, String> {
+        val primary = sources.first()
+        val agencyName = primary.docTitle.substringBefore(":").trim()
+        val topicTitle = primary.docTitle.substringAfter(":", primary.docTitle).trim()
+
+        // Limpa o prefixo técnico para soar como uma conversa natural
+        val cleanPrimaryBody = primary.contentText
+            .replace(Regex("^DIRETRIZ OFICIAL\\s*\\([^)]*\\):\\s*"), "")
+            .trim()
+
+        if (!wantsDetails) {
+            // MODO SUCINTO E NATURAL (PADRÃO)
+            val numberedSteps = cleanPrimaryBody.split(Regex("(?=\\b[1-4]\\)\\s)"))
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+
+            val sb = StringBuilder()
+            sb.append("Sobre **${topicTitle.lowercase(Locale.getDefault())}**, a orientação prática da **$agencyName** é direta:\n\n")
+
+            if (numberedSteps.size >= 2) {
+                // Resume cada etapa para a frase principal sem despejar textos gigantes
+                numberedSteps.take(3).forEach { step ->
+                    val shortStep = shortenToEssentialSentence(step)
+                    sb.append("• $shortStep\n")
+                }
+            } else {
+                val sentences = cleanPrimaryBody.split(Regex("(?<=\\.)\\s+"))
+                sentences.take(3).forEach { s ->
+                    if (s.isNotBlank()) sb.append("• ${s.trim()}\n")
+                }
+            }
+
+            sb.append("\nSe quiser o passo a passo detalhado ou cuidados adicionais, é só tocar em **\"🔍 Mais detalhes\"** ou me pedir!")
+            return Pair(sb.toString(), "RESPOSTA SUCINTA • $agencyName")
+        } else {
+            // MODO DETALHADO E COMPLETO (QUANDO O USUÁRIO PEDE MAIS INFORMAÇÕES)
+            val sb = StringBuilder()
+            sb.append("Aqui está o detalhamento completo segundo **$agencyName** sobre **$topicTitle**:\n\n")
+
+            sources.forEachIndexed { idx, chunk ->
+                if (idx > 0) {
+                    sb.append("\n📌 **Complemento (${chunk.docTitle}):**\n")
+                }
+                val formatted = chunk.contentText
+                    .replace(Regex("^DIRETRIZ OFICIAL\\s*\\([^)]*\\):\\s*"), "")
+                    .replace(" 1) ", "\n\n1️⃣ ")
+                    .replace(" 2) ", "\n\n2️⃣ ")
+                    .replace(" 3) ", "\n\n3️⃣ ")
+                    .replace(" 4) ", "\n\n4️⃣ ")
+                    .replace(" • ", "\n• ")
+                    .trim()
+                sb.append(formatted).append("\n")
+            }
+
+            return Pair(sb.toString().trim(), "GUIA DETALHADO • $agencyName")
+        }
+    }
+
+    /**
+     * Enxuga um parágrafo longo mantendo a regra/dosagem principal de forma natural e rápida de ler.
+     */
+    private fun shortenToEssentialSentence(stepText: String): String {
+        val withoutNumber = stepText.replace(Regex("^[1-9]\\)\\s*"), "").trim()
+        val sentences = withoutNumber.split(Regex("(?<=\\.)\\s+"))
+        return if (sentences.size <= 2 || withoutNumber.length <= 210) {
+            withoutNumber
+        } else {
+            sentences.take(2).joinToString(" ")
+        }
+    }
+
+    /**
+     * Consulta aberta para perguntas de Tema Livre confirmadas pelo usuário.
+     */
+    private fun tryOpenDomainModelInference(query: String, detailed: Boolean): String? {
+        // 1. Tenta inferência generativa aberta (Pollinations Text API - gratuita, sem chave)
+        try {
+            val sysInstruction = if (detailed) {
+                "Responda em português do Brasil de forma natural, clara, amigável e detalhada: "
+            } else {
+                "Responda em português do Brasil com naturalidade e de forma sucinta e direta (em até 4 frases curtas): "
+            }
+            val encodedPrompt = URLEncoder.encode(sysInstruction + query, "UTF-8")
+            val url = URL("https://text.pollinations.ai/$encodedPrompt")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5500
+                readTimeout = 6500
+                setRequestProperty("User-Agent", "ResilienceHub-Assistant/1.0")
+            }
+            if (conn.responseCode in 200..299) {
+                val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
+                if (text.isNotBlank() && text.length > 10 && !text.startsWith("<!DOCTYPE", true)) {
+                    return if (!detailed) {
+                        "$text\n\n*(Se quiser que eu aprofunde mais nesse assunto, é só pedir!)*"
+                    } else {
+                        text
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Pollinations indisponível ou sem internet no momento", e)
+        }
+
+        // 2. Fallback enciclopédico via Wikipedia PT REST API se houver conexão
+        try {
+            val cleanSubject = query
+                .replace(Regex("(?i)^(o que e|o que sao|quem foi|quem e|como funciona|me fale sobre|fale sobre|explique)\\s+"), "")
+                .replace("?", "")
+                .trim()
+            val encodedSubject = URLEncoder.encode(cleanSubject, "UTF-8")
+            val wikiUrl = URL("https://pt.wikipedia.org/api/rest_v1/page/summary/$encodedSubject")
+            val conn = (wikiUrl.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 4000
+                readTimeout = 4500
+                setRequestProperty("User-Agent", "ResilienceHub/1.0")
+            }
+            if (conn.responseCode in 200..299) {
+                val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val json = JSONObject(body)
+                val extract = json.optString("extract", "").trim()
+                if (extract.isNotBlank()) {
+                    return if (!detailed && extract.length > 320) {
+                        val shortExtract = extract.split(Regex("(?<=\\.)\\s+")).take(2).joinToString(" ")
+                        "$shortExtract\n\n*(Quer mais detalhes sobre esse tema? É só pedir!)*"
+                    } else {
+                        extract
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        return null
+    }
+
+    /**
+     * Quando o celular está 100% desconectado da internet e sem o arquivo `.task` importado,
+     * ainda responde cálculos matemáticos, conversões e temas gerais com naturalidade.
+     */
+    private fun generateOfflineFreeTopicFallback(query: String, detailed: Boolean): String {
+        val norm = normalizeAccents(query)
+
+        // Verifica se é uma conta matemática simples
+        val mathMatch = Regex("(-?\\d+(?:[.,]\\d+)?)\\s*([+\\-*/xX])\\s*(-?\\d+(?:[.,]\\d+)?)").find(norm)
+        if (mathMatch != null) {
+            val a = mathMatch.groupValues[1].replace(",", ".").toDoubleOrNull()
+            val op = mathMatch.groupValues[2]
+            val b = mathMatch.groupValues[3].replace(",", ".").toDoubleOrNull()
+            if (a != null && b != null) {
+                val res = when (op) {
+                    "+" -> a + b
+                    "-" -> a - b
+                    "*", "x", "X" -> a * b
+                    "/" -> if (b != 0.0) a / b else Double.NaN
+                    else -> Double.NaN
+                }
+                if (!res.isNaN()) {
+                    val formatted = if (res % 1.0 == 0.0) res.toLong().toString() else String.format(Locale.US, "%.2f", res)
+                    return "O resultado de **$a $op $b** é **$formatted**."
+                }
+            }
+        }
+
+        return if (detailed) {
+            "Você confirmou a consulta de tema livre para **\"$query\"**.\n\n" +
+                "No momento seu celular está **100% offline** e sem um arquivo de modelo aberto (`.task` / Gemma) importado. " +
+                "Para que eu possa responder qualquer assunto de conhecimento geral (culinária, história, ciências, programação, etc.) mesmo sem internet, " +
+                "toque no botão **\"LLM .task\"** no topo desta tela e carregue o arquivo do modelo Gemma no aparelho, ou conecte-se à internet."
+        } else {
+            "Certo! Como estamos **100% offline** neste momento e sem o arquivo `.task` (Gemma) carregado, minha memória local instalada foca nos 30 protocolos de sobrevivência e nos dados da sua família. " +
+                "Se você conectar à internet ou importar o arquivo **LLM .task** no botão lá no topo, respondo sobre **\"$query\"** e qualquer outro tema livre na hora!"
+        }
+    }
 
     suspend fun importModelFromUri(modelUri: Uri): Result<String> = withContext(Dispatchers.IO) {
         try {
@@ -467,100 +898,5 @@ class PdfRagManager(
             File("/data/local/tmp/gemma-2b-it-cpu-int4.bin")
         )
         return candidateLocations.firstOrNull { it.exists() }
-    }
-
-    private fun executeRagInference(
-        prompt: String,
-        query: String,
-        sources: List<ManualChunkFtsEntity>,
-        modelPath: String?
-    ): Pair<String, String> {
-        val modelFile = findLocalModelFile(modelPath)
-
-        if (modelFile != null && modelFile.exists()) {
-            return try {
-                val llm = if (cachedLlmInference != null && cachedModelPath == modelFile.absolutePath) {
-                    cachedLlmInference!!
-                } else {
-                    val options = LlmInference.LlmInferenceOptions.builder()
-                        .setModelPath(modelFile.absolutePath)
-                        .setMaxTokens(512)
-                        .setTemperature(0.1f)
-                        .setTopK(1)
-                        .build()
-                    LlmInference.createFromOptions(context, options).also {
-                        cachedLlmInference = it
-                        cachedModelPath = modelFile.absolutePath
-                    }
-                }
-
-                val response = llm.generateResponse(prompt)
-                Pair(response, "IA LOCAL GEMMA (${modelFile.name})")
-            } catch (t: Throwable) {
-                Log.w(TAG, "Falha na inferência MediaPipe LlmInference, usando síntese conversacional oficial", t)
-                conversationalOfficialSynthesis(query, sources)
-            }
-        } else {
-            return conversationalOfficialSynthesis(query, sources)
-        }
-    }
-
-    /**
-     * Sintetiza uma resposta conversacional rica, estruturada e 100% fiel aos protocolos
-     * dos órgãos oficiais (Defesa Civil, OMS, Cruz Vermelha, Ministério da Saúde, FEMA, CNEN, CBMERJ).
-     */
-    private fun conversationalOfficialSynthesis(
-        query: String,
-        sources: List<ManualChunkFtsEntity>
-    ): Pair<String, String> {
-        val mode = "RAG OFICIAL OFFLINE (Defesa Civil • OMS • CICV • FEMA)"
-
-        if (sources.isEmpty()) {
-            return Pair(
-                "Não encontrei um protocolo específico para \"$query\", mas posso orientar você e sua família sobre:\n" +
-                    "• Guerras, Bombardeios e Conflito Urbano (CICV)\n" +
-                    "• Emergência Nuclear, Fallout e Armas Químicas (FEMA / CNEN)\n" +
-                    "• Purificação de Água (Hipoclorito 2,5%, Clorin, Fervura)\n" +
-                    "• Primeiros Socorros (Hemorragia/Torniquete, RCP, Engasgo Adulto/Bebê, Queimaduras, Soro Caseiro)\n" +
-                    "• Enchentes, Deslizamentos, Terremotos, Apagão e Banheiro Seco.\n\n" +
-                    "Digite sua dúvida ou toque em um dos temas rápidos abaixo!",
-                mode
-            )
-        }
-
-        val sb = StringBuilder()
-        val primary = sources.first()
-        sb.append("🛡 **Orientação Oficial de Sobrevivência para sua Família**\n")
-        sb.append("Com base nas diretrizes oficiais consultadas, siga rigorosamente estes passos:\n\n")
-
-        sources.forEachIndexed { idx, chunk ->
-            val headerIcon = when (chunk.category) {
-                "WAR_CONFLICT" -> "⚠️"
-                "NUCLEAR_CBRN" -> "☢️"
-                "MEDS" -> "🚑"
-                "WATER" -> "💧"
-                "NATURAL_DISASTER" -> "🌊"
-                "EVACUATION" -> "🎒"
-                "SANITATION" -> "🪣"
-                "FOOD" -> "🥫"
-                else -> "⚡"
-            }
-            sb.append("$headerIcon **${idx + 1}. ${chunk.docTitle}**\n")
-
-            // Formata os passos numerados (1), 2), 3) ou •) em linhas claras para leitura rápida sob estresse
-            val formattedBody = chunk.contentText
-                .replace("DIRETRIZ OFICIAL", "• Fonte")
-                .replace(" 1) ", "\n   1️⃣ ")
-                .replace(" 2) ", "\n   2️⃣ ")
-                .replace(" 3) ", "\n   3️⃣ ")
-                .replace(" 4) ", "\n   4️⃣ ")
-                .replace(" • ", "\n   • ")
-                .trim()
-
-            sb.append("   $formattedBody\n\n")
-        }
-
-        sb.append("✅ *Protocolo verificado nos manuais oficiais offline (${primary.category}). Se precisar de detalhes sobre outro cenário ou dosagem pediátrica, pergunte abaixo.*")
-        return Pair(sb.toString(), mode)
     }
 }
