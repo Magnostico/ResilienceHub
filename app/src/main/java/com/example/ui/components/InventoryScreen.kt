@@ -226,32 +226,78 @@ fun InventoryScreen(
         }
 
         if (activeBarcodeFilter != null) {
+            val matchedByScan = state.allRegisteredItems.find {
+                it.barcode != null && it.barcode.trim() == activeBarcodeFilter!!.trim()
+            }
             item {
-                InputChip(
-                    selected = true,
-                    onClick = { activeBarcodeFilter = null },
-                    label = {
-                        Text(
-                            "Filtro EAN Ativo: $activeBarcodeFilter (Toque para limpar)",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    },
-                    trailingIcon = {
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "Limpar Filtro",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    },
-                    colors = InputChipDefaults.inputChipColors(
-                        selectedContainerColor = Color(0xFF0284C7),
-                        selectedLabelColor = Color.White
-                    ),
-                    modifier = Modifier.testTag("chip_active_barcode_filter")
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    InputChip(
+                        selected = true,
+                        onClick = { activeBarcodeFilter = null },
+                        label = {
+                            Text(
+                                "Filtro EAN Ativo: $activeBarcodeFilter (Toque para limpar)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Limpar Filtro",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        colors = InputChipDefaults.inputChipColors(
+                            selectedContainerColor = Color(0xFF0284C7),
+                            selectedLabelColor = Color.White
+                        ),
+                        modifier = Modifier.testTag("chip_active_barcode_filter")
+                    )
+
+                    if (matchedByScan != null) {
+                        Surface(
+                            color = Color(0xFF062E22),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Color(0xFF34D399)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "✓ Reconhecido: ${matchedByScan.name}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF34D399)
+                                    )
+                                    Text(
+                                        text = "Estoque atual: ${if (matchedByScan.quantity % 1.0 == 0.0) matchedByScan.quantity.toInt() else matchedByScan.quantity} ${matchedByScan.unit}",
+                                        fontSize = 11.sp,
+                                        color = Color.White
+                                    )
+                                }
+                                Button(
+                                    onClick = { viewModel.updateItemQuantity(matchedByScan.id, 1.0) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF10B981),
+                                        contentColor = Color(0xFF090D16)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("+1 ${matchedByScan.unit}", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

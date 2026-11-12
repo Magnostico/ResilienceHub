@@ -77,6 +77,18 @@ private fun normalizeForSearch(input: String): String {
 fun AddItemDialog(
     existingItems: List<InventoryItemEntity> = emptyList(),
     onDismiss: () -> Unit,
+    onIncrementExistingItem: ((itemId: Long, deltaQty: Double) -> Unit)? = null,
+    onConfirmWithLotOption: ((
+        name: String,
+        barcode: String?,
+        category: ItemCategory,
+        location: StorageLocation,
+        quantity: Double,
+        unit: String,
+        expirationMonth: Int?,
+        expirationYear: Int?,
+        forceSeparateLot: Boolean
+    ) -> Unit)? = null,
     onConfirm: (
         name: String,
         barcode: String?,
@@ -86,7 +98,7 @@ fun AddItemDialog(
         unit: String,
         expirationMonth: Int?,
         expirationYear: Int?
-    ) -> Unit
+    ) -> Unit = { _, _, _, _, _, _, _, _ -> }
 ) {
     val currentCal = remember { Calendar.getInstance() }
     val defaultMonth = remember { ((currentCal.get(Calendar.MONTH) + 1 + 6 - 1) % 12) + 1 }
@@ -104,6 +116,15 @@ fun AddItemDialog(
     var monthText by remember { mutableStateOf(String.format(Locale.US, "%02d", defaultMonth)) }
     var yearText by remember { mutableStateOf(defaultYear.toString()) }
     var hideSuggestionsAfterPick by remember { mutableStateOf(false) }
+    var forceSeparateLot by remember { mutableStateOf(false) }
+
+    // Item já existente no estoque com o mesmo código de barras
+    val matchedBarcodeItem = remember(barcode, existingItems, selectedLocation) {
+        val cleanCode = barcode.trim()
+        if (cleanCode.isBlank()) null
+        else existingItems.find { it.barcode?.trim() == cleanCode && it.location == selectedLocation }
+            ?: existingItems.find { it.barcode?.trim() == cleanCode }
+    }
 
     // Lista sem duplicatas dos itens já cadastrados pelo usuário para sugestão inteligente
     val uniqueRegisteredItems = remember(existingItems) {
@@ -286,10 +307,12 @@ fun AddItemDialog(
                         value = barcode,
                         onValueChange = { code ->
                             barcode = code
-                            // Se o código de barras já existir no estoque, preenche automaticamente
-                            val matchByCode = uniqueRegisteredItems.find { it.barcode == code && code.isNotBlank() }
-                            if (matchByCode != null && name.isBlank()) {
+                            // Se o código de barras já existir no estoque, preenche automaticamente e prepara para somar +1
+                            val matchByCode = existingItems.find { it.barcode?.trim() == code.trim() && code.isNotBlank() }
+                            if (matchByCode != null) {
                                 applySuggestion(matchByCode)
+                                quantityText = "1"
+                                forceSeparateLot = false
                             }
                         },
                         label = { Text("Código EAN-13 (Opcional)", color = Color(0xFFCBD5E1)) },
@@ -319,6 +342,148 @@ fun AddItemDialog(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Câmera", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                // --- AVISO INTELIGENTE QUANDO O CÓDIGO DE BARRAS JÁ EXISTE NO ESTOQUE ---
+                if (matchedBarcodeItem != null) {
+                    val currentQtyFormatted = if (matchedBarcodeItem.quantity % 1.0 == 0.0) {
+                        matchedBarcodeItem.quantity.toInt().toString()
+                    } else {
+                        String.format(Locale.US, "%.1f", matchedBarcodeItem.quantity)
+                    }
+                    Surface(
+                        color = Color(0xFF062E22),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.2.dp, Color(0xFF34D399)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = Color(0xFF34D399),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Produto já cadastrado reconhecido pelo EAN!",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF34D399)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "${matchedBarcodeItem.name} • Estoque atual: $currentQtyFormatted ${matchedBarcodeItem.unit}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = if (!forceSeparateLot)
+                                    "Em vez de duplicar o produto, vamos acrescentar +${quantityText.ifBlank { "1" }} ${unitText} ao registro já existente."
+                                else
+                                    "Modo Lote Separado ativo: será criado um card separado com a nova validade informada abaixo.",
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp,
+                                color = Color(0xFFA7F3D0)
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Botão rápido de 1 toque para somar +1 e fechar na hora
+                            Button(
+                                onClick = {
+                                    val qtyToAdd = quantityText.replace(",", ".").toDoubleOrNull() ?: 1.0
+                                    if (onIncrementExistingItem != null) {
+                                        onIncrementExistingItem(matchedBarcodeItem.id, qtyToAdd)
+                                    } else {
+                                        val expMonth = if (hasExpiration) monthText.toIntOrNull()?.coerceIn(1, 12) else null
+                                        val expYear = if (hasExpiration) yearText.toIntOrNull()?.coerceIn(2020, 2100) else null
+                                        onConfirmWithLotOption?.invoke(
+                                            matchedBarcodeItem.name,
+                                            matchedBarcodeItem.barcode,
+                                            matchedBarcodeItem.category,
+                                            matchedBarcodeItem.location,
+                                            qtyToAdd,
+                                            matchedBarcodeItem.unit,
+                                            expMonth,
+                                            expYear,
+                                            false
+                                        ) ?: onConfirm(
+                                            matchedBarcodeItem.name,
+                                            matchedBarcodeItem.barcode,
+                                            matchedBarcodeItem.category,
+                                            matchedBarcodeItem.location,
+                                            qtyToAdd,
+                                            matchedBarcodeItem.unit,
+                                            expMonth,
+                                            expYear
+                                        )
+                                    }
+                                    onDismiss()
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF10B981),
+                                    contentColor = Color(0xFF090D16)
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Default.AddCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Acrescentar +${quantityText.ifBlank { "1" }} ${matchedBarcodeItem.unit} Agora",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            // Seletor para caso a safra/validade seja diferente
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                FilterChip(
+                                    selected = !forceSeparateLot,
+                                    onClick = { forceSeparateLot = false },
+                                    label = {
+                                        Text(
+                                            "Somar no existente",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (!forceSeparateLot) Color(0xFF090D16) else Color.White
+                                        )
+                                    },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Color(0xFF34D399),
+                                        containerColor = Color(0xFF090D16)
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                FilterChip(
+                                    selected = forceSeparateLot,
+                                    onClick = { forceSeparateLot = true },
+                                    label = {
+                                        Text(
+                                            "Safra/Validade diferente",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (forceSeparateLot) Color(0xFF090D16) else Color.White
+                                        )
+                                    },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Color(0xFFFBBF24),
+                                        containerColor = Color(0xFF090D16)
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -525,32 +690,50 @@ fun AddItemDialog(
             }
         },
         confirmButton = {
+            val isAddingToExisting = matchedBarcodeItem != null && !forceSeparateLot
             Button(
                 onClick = {
                     if (name.isNotBlank()) {
                         val qty = quantityText.replace(",", ".").toDoubleOrNull() ?: 1.0
                         val expMonth = if (hasExpiration) monthText.toIntOrNull()?.coerceIn(1, 12) else null
                         val expYear = if (hasExpiration) yearText.toIntOrNull()?.coerceIn(2020, 2100) else null
-                        onConfirm(
-                            name.trim(),
-                            barcode.ifBlank { null },
-                            selectedCategory,
-                            selectedLocation,
-                            qty,
-                            unitText.ifBlank { "un" },
-                            expMonth,
-                            expYear
-                        )
+                        if (onConfirmWithLotOption != null) {
+                            onConfirmWithLotOption(
+                                name.trim(),
+                                barcode.ifBlank { null },
+                                selectedCategory,
+                                selectedLocation,
+                                qty,
+                                unitText.ifBlank { "un" },
+                                expMonth,
+                                expYear,
+                                forceSeparateLot
+                            )
+                        } else {
+                            onConfirm(
+                                name.trim(),
+                                barcode.ifBlank { null },
+                                selectedCategory,
+                                selectedLocation,
+                                qty,
+                                unitText.ifBlank { "un" },
+                                expMonth,
+                                expYear
+                            )
+                        }
                         onDismiss()
                     }
                 },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFF59E0B),
+                    containerColor = if (isAddingToExisting) Color(0xFF10B981) else Color(0xFFF59E0B),
                     contentColor = Color(0xFF090D16)
                 ),
                 modifier = Modifier.testTag("btn_confirm_add_item")
             ) {
-                Text("Salvar Item", fontWeight = FontWeight.ExtraBold)
+                Text(
+                    text = if (isAddingToExisting) "Somar +${quantityText.ifBlank { "1" }} ao Existente" else "Salvar Item",
+                    fontWeight = FontWeight.ExtraBold
+                )
             }
         },
         dismissButton = {
@@ -565,9 +748,11 @@ fun AddItemDialog(
             onDismiss = { showBarcodeScanner = false },
             onBarcodeScanned = { scannedCode ->
                 barcode = scannedCode
-                val matchByCode = uniqueRegisteredItems.find { it.barcode == scannedCode }
+                val matchByCode = existingItems.find { it.barcode?.trim() == scannedCode.trim() }
                 if (matchByCode != null) {
                     applySuggestion(matchByCode)
+                    quantityText = "1"
+                    forceSeparateLot = false
                 }
             }
         )

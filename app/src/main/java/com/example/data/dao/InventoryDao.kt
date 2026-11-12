@@ -28,6 +28,9 @@ interface InventoryDao {
     @Query("SELECT * FROM inventory_items WHERE barcode = :barcode LIMIT 1")
     suspend fun findByBarcode(barcode: String): InventoryItemEntity?
 
+    @Query("SELECT * FROM inventory_items WHERE barcode = :barcode ORDER BY expirationDate ASC NULLS LAST")
+    suspend fun findAllByBarcode(barcode: String): List<InventoryItemEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertItem(item: InventoryItemEntity): Long
 

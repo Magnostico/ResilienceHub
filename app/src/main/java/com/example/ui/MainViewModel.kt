@@ -963,17 +963,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         unit: String,
         expirationMonth: Int?,
         expirationYear: Int?,
-        barcode: String? = null
+        barcode: String? = null,
+        forceSeparateLot: Boolean = false
     ) {
         viewModelScope.launch {
-            val now = System.currentTimeMillis()
+            val cleanBarcode = barcode?.trim()?.ifBlank { null }
             val expDate = monthYearToExpirationTimestamp(expirationMonth, expirationYear)
+
+            // Se o código de barras já existir no estoque e o usuário não pediu explicitamente outro lote separado,
+            // acrescenta a quantidade (+1 ou +quantidade informada) ao item já cadastrado!
+            if (cleanBarcode != null && !forceSeparateLot) {
+                val matches = repository.findAllByBarcode(cleanBarcode)
+                val targetExisting = matches.find { it.location == location && it.expirationDate == expDate }
+                    ?: matches.find { it.location == location }
+                    ?: matches.firstOrNull()
+
+                if (targetExisting != null) {
+                    val updatedQty = (targetExisting.quantity + quantity).coerceAtLeast(0.0)
+                    repository.updateQuantity(targetExisting.id, updatedQty)
+                    scheduleAutoBackup()
+                    return@launch
+                }
+            }
+
+            val now = System.currentTimeMillis()
             val lastMaint = if (category == ItemCategory.ENERGY_GEAR) now else null
 
             repository.insertItem(
                 InventoryItemEntity(
                     name = name,
-                    barcode = barcode?.ifBlank { null },
+                    barcode = cleanBarcode,
                     category = category,
                     location = location,
                     quantity = quantity,
@@ -994,9 +1013,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         quantity: Double,
         unit: String,
         expirationDays: Int?,
-        barcode: String? = null
+        barcode: String? = null,
+        forceSeparateLot: Boolean = false
     ) {
         viewModelScope.launch {
+            val cleanBarcode = barcode?.trim()?.ifBlank { null }
+            if (cleanBarcode != null && !forceSeparateLot) {
+                val existing = repository.findByBarcode(cleanBarcode)
+                if (existing != null) {
+                    val updatedQty = (existing.quantity + quantity).coerceAtLeast(0.0)
+                    repository.updateQuantity(existing.id, updatedQty)
+                    scheduleAutoBackup()
+                    return@launch
+                }
+            }
+
             val now = System.currentTimeMillis()
             val expDate = expirationDays?.let { now + (it.toLong() * 24 * 3600 * 1000) }
             val lastMaint = if (category == ItemCategory.ENERGY_GEAR) now else null
@@ -1004,7 +1035,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.insertItem(
                 InventoryItemEntity(
                     name = name,
-                    barcode = barcode?.ifBlank { null },
+                    barcode = cleanBarcode,
                     category = category,
                     location = location,
                     quantity = quantity,

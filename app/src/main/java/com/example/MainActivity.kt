@@ -164,7 +164,10 @@ class MainActivity : ComponentActivity() {
                         AddItemDialog(
                             existingItems = state.allRegisteredItems,
                             onDismiss = { showAddItemDialog = false },
-                            onConfirm = { name, barcode, category, location, qty, unit, expMonth, expYear ->
+                            onIncrementExistingItem = { itemId, deltaQty ->
+                                viewModel.updateItemQuantity(itemId, deltaQty)
+                            },
+                            onConfirmWithLotOption = { name, barcode, category, location, qty, unit, expMonth, expYear, forceSeparateLot ->
                                 viewModel.addNewItemWithMonthYear(
                                     name = name,
                                     category = category,
@@ -173,7 +176,8 @@ class MainActivity : ComponentActivity() {
                                     unit = unit,
                                     expirationMonth = expMonth,
                                     expirationYear = expYear,
-                                    barcode = barcode
+                                    barcode = barcode,
+                                    forceSeparateLot = forceSeparateLot
                                 )
                             }
                         )

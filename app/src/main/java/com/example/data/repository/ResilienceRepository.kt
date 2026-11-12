@@ -26,6 +26,12 @@ class ResilienceRepository(private val database: AppDatabase) {
     fun getItemById(id: Long): Flow<InventoryItemEntity?> =
         database.inventoryDao().getItemById(id)
 
+    suspend fun findByBarcode(barcode: String): InventoryItemEntity? =
+        database.inventoryDao().findByBarcode(barcode)
+
+    suspend fun findAllByBarcode(barcode: String): List<InventoryItemEntity> =
+        database.inventoryDao().findAllByBarcode(barcode)
+
     suspend fun insertItem(item: InventoryItemEntity): Long =
         database.inventoryDao().insertItem(item)
 
