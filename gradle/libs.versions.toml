@@ -44,7 +44,8 @@ work = "2.10.0"
 biometric = "1.2.0-alpha05"
 pdfbox = "2.0.27.0"
 mlkitBarcode = "17.3.0"
-mediapipeGenai = "0.10.14"
+mediapipeGenai = "0.10.35"
+litertlm = "0.16.1"
 
 
 [libraries]
@@ -104,6 +105,7 @@ androidx-biometric = { group = "androidx.biometric", name = "biometric", version
 pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version.ref = "pdfbox" }
 mlkit-barcode-scanning = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkitBarcode" }
 mediapipe-tasks-genai = { group = "com.google.mediapipe", name = "tasks-genai", version.ref = "mediapipeGenai" }
+litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
 
 
 [plugins]
