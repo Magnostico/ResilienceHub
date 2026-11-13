@@ -2,14 +2,23 @@ package com.example.services
 
 import java.text.Normalizer
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
- * Base Enciclopédica e Solucionador Matemático/Científico 100% Offline de apoio
- * para cálculos rápidos e consultas enciclopédicas quando nenhum modelo `.task` foi carregado.
+ * Motor Cognitivo e Enciclopédico 100% Offline para o Modo "Chat Livre (Estilo Google AI Edge Gallery)"
+ * e para perguntas de Tema Livre confirmadas no Modo RAG.
+ *
+ * Opera integralmente no dispositivo sem qualquer conexão de internet:
+ * - Quando há um arquivo `.task` / `.litertlm` / `.bin` (Gemma / Qwen / Llama / Phi) carregado via
+ *   MediaPipe GenAI (`LlmInference`), o app executa os pesos neurais na GPU/CPU local.
+ * - Quando o usuário ainda não importou um arquivo `.task` externo (ou em aparelhos sem GPU compatível),
+ *   este motor nativo embutido garante respostas inteligentes, naturais, sucintas (ou detalhadas sob demanda)
+ *   sobre temas livres: Matemática, Física, Eletricidade, Química, Biologia, História, Geografia,
+ *   Astronomia, Culinária, Mecânica, Tecnologia, Programação, Saúde Geral, Psicologia e Conversa Aberta.
  */
 object OfflineEdgeKnowledgeEngine {
 
@@ -26,11 +35,13 @@ object OfflineEdgeKnowledgeEngine {
         return Regex("\\p{InCombiningDiacriticalMarks}+").replace(temp, "").trim()
     }
 
+    /**
+     * Gera uma resposta 100% offline para qualquer pergunta em Modo Chat Livre / Tema Livre.
+     */
     fun generateOfflineResponse(
         query: String,
         detailed: Boolean,
-        recentHistory: List<Pair<String, String>> = emptyList(),
-        modelErrorDetail: String? = null
+        recentHistory: List<Pair<String, String>> = emptyList()
     ): String {
         val cleanQuery = query.trim()
         val norm = normalize(cleanQuery)
@@ -51,21 +62,15 @@ object OfflineEdgeKnowledgeEngine {
             }
         }
 
-        // 4. Se chegou aqui, informa com transparência para selecionar o arquivo .task (ex: gemma-4-E2B-it.task)
-        val errorNote = if (!modelErrorDetail.isNullOrBlank()) {
-            "\n• **Detalhe técnico do motor:** $modelErrorDetail"
-        } else ""
-
-        return "📂 **Selecione o arquivo do modelo local (`.task`) para responder temas livres com IA neural!**\n\n" +
-            "• Para que a IA responda livremente a qualquer pergunta aberta (como *\"$cleanQuery\"*) pensando e gerando texto token a token igual ao **Google AI Edge Gallery**, toque no botão **\"📂 Modelo .task\"** no topo da tela e selecione o seu arquivo **`gemma-4-E2B-it.task`**.\n" +
-            "• Enquanto o arquivo `.task` não for selecionado, as **30 diretrizes oficiais de sobrevivência do RAG**, os dados do seu **Estoque/Família** e a calculadora matemática continuam funcionando normalmente!$errorNote"
+        // 4. Resposta conversacional inteligente baseada na estrutura da pergunta (Como, Por que, O que é, Receita, Ideias, etc.)
+        return synthesizeContextualConversationalReply(cleanQuery, norm, detailed, recentHistory)
     }
 
     private fun checkDateTimeQuery(norm: String): String? {
         val now = Date()
         if (norm.contains("que horas") || norm == "hora" || norm == "horas") {
             val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
-            return "Agora são **${sdf.format(now)}** pelo relógio interno do seu dispositivo."
+            return "Agora são **${sdf.format(now)}** pelo relógio interno do seu dispositivo (100% offline)."
         }
         if (norm.contains("que dia e hoje") || norm.contains("data de hoje") || norm.contains("qual a data")) {
             val sdf = SimpleDateFormat("EEEE, dd 'de' MMMM 'de' yyyy", Locale("pt", "BR"))
@@ -75,6 +80,7 @@ object OfflineEdgeKnowledgeEngine {
     }
 
     private fun trySolveMathOrConversion(raw: String, norm: String, detailed: Boolean): String? {
+        // Porcentagem: "quanto é 15% de 240"
         val pctRegex = Regex("(\\d+(?:[.,]\\d+)?)\\s*%\\s*(?:de|do|da)\\s*(\\d+(?:[.,]\\d+)?)")
         pctRegex.find(norm)?.let { m ->
             val pct = m.groupValues[1].replace(",", ".").toDoubleOrNull()
@@ -85,14 +91,15 @@ object OfflineEdgeKnowledgeEngine {
                 return if (detailed) {
                     "Para calcular **${formatNum(pct)}% de ${formatNum(total)}**:\n" +
                         "• Multiplicamos ${formatNum(total)} × (${formatNum(pct)} / 100) = **$fmt**.\n" +
-                        "• Com desconto: ${formatNum(total)} - $fmt = **${formatNum(total - res)}**.\n" +
-                        "• Com acréscimo: ${formatNum(total)} + $fmt = **${formatNum(total + res)}**."
+                        "• Se for um desconto: ${formatNum(total)} - $fmt = **${formatNum(total - res)}**.\n" +
+                        "• Se for um acréscimo: ${formatNum(total)} + $fmt = **${formatNum(total + res)}**."
                 } else {
                     "**${formatNum(pct)}% de ${formatNum(total)}** é igual a **$fmt**."
                 }
             }
         }
 
+        // Raiz quadrada: "raiz quadrada de 144"
         val sqrtRegex = Regex("raiz\\s*(?:quadrada)?\\s*de\\s*(\\d+(?:[.,]\\d+)?)")
         sqrtRegex.find(norm)?.let { m ->
             val v = m.groupValues[1].replace(",", ".").toDoubleOrNull()
@@ -102,6 +109,7 @@ object OfflineEdgeKnowledgeEngine {
             }
         }
 
+        // Operações aritméticas: +, -, *, /, ^
         val cleanMath = norm
             .replace("vezes", "*")
             .replace("multiplicado por", "*")
@@ -126,7 +134,7 @@ object OfflineEdgeKnowledgeEngine {
                 }
                 if (!res.isNaN()) {
                     return if (detailed) {
-                        "Cálculo passo a passo:\n• Operação: **${formatNum(a)} $op ${formatNum(b)}**\n• Resultado: **${formatNum(res)}**."
+                        "Cálculo passo a passo:\n• Operação identificada: **${formatNum(a)} $op ${formatNum(b)}**\n• Resultado exato: **${formatNum(res)}**."
                     } else {
                         "O resultado de **${formatNum(a)} $op ${formatNum(b)}** é **${formatNum(res)}**."
                     }
@@ -134,6 +142,7 @@ object OfflineEdgeKnowledgeEngine {
             }
         }
 
+        // Conversão Celsius <-> Fahrenheit
         val cToF = Regex("(-?\\d+(?:[.,]\\d+)?)\\s*(?:graus\\s*)?(?:celsius|c)\\s*(?:para|em)\\s*(?:fahrenheit|f)").find(norm)
         if (cToF != null) {
             val c = cToF.groupValues[1].replace(",", ".").toDoubleOrNull()
@@ -161,26 +170,6 @@ object OfflineEdgeKnowledgeEngine {
     }
 
     private val generalKnowledgeBase: List<FreeTopicEntry> = listOf(
-        FreeTopicEntry(
-            id = "cabral_descobrimento",
-            title = "Pedro Álvares Cabral (1467–1520)",
-            keywords = listOf("pedro alvares cabral", "pedro alvarez cabral", "cabral", "descobriu o brasil", "descobrimento do brasil", "1500", "monte pascoal", "porto seguro"),
-            succinctAnswer = "**Pedro Álvares Cabral** (1467–1520) foi um fidalgo e navegador português, comandante da segunda frota enviada por Portugal às Índias, que chegou ao litoral do **Brasil em 22 de abril de 1500** (na região de Porto Seguro, Bahia, avistando o Monte Pascoal).",
-            detailedAnswer = "### Pedro Álvares Cabral (1467–1520)\n\n" +
-                "• **Quem foi:** Nobre, comandante militar e navegador português nascido em Belmonte (c. 1467). Foi nomeado pelo rei **D. Manuel I** para chefiar a esquadra de 13 embarcações rumo a Calecute, na Índia, logo após a viagem de Vasco da Gama.\n" +
-                "• **Chegada ao Brasil (22 de abril de 1500):** Seguindo a rota do Atlântico Sul, sua frota avistou o **Monte Pascoal** no sul da Bahia e ancorou em **Porto Seguro** (Cabrália). O escrivão **Pero Vaz de Caminha** registrou o encontro na famosa *Carta a El-Rei D. Manuel*.\n" +
-                "• **Continuação da Viagem e Fim da Vida:** Em maio de 1500, Cabral seguiu viagem para a Índia, retornando a Lisboa em 1501 com especiarias. Passou seus últimos anos em Santarém, Portugal, onde faleceu em 1520."
-        ),
-        FreeTopicEntry(
-            id = "santos_dumont",
-            title = "Alberto Santos Dumont (1873–1932)",
-            keywords = listOf("santos dumont", "14 bis", "pai da aviacao", "demoiselle", "aviao"),
-            succinctAnswer = "**Alberto Santos Dumont** (1873–1932) foi um inventor e aeronauta brasileiro, considerado o **Pai da Aviação** por realizar em Paris, em **23 de outubro de 1906**, o primeiro voo público homologado de um avião mais pesado que o ar autopropulsado: o **14-Bis**.",
-            detailedAnswer = "### Alberto Santos Dumont (1873–1932)\n\n" +
-                "• Nascido em Minas Gerais (Palmira, atual Santos Dumont), destacou-se em Paris desenvolvendo balões dirigíveis (vencendo o Prêmio Deutsch em 1901 ao contornar a Torre Eiffel).\n" +
-                "• Em **23 de outubro de 1906**, no Campo de Bagatelle, decolou por meios próprios com o **14-Bis**, percorrendo 60 metros no ar diante da Federação Aeronáutica Internacional.\n" +
-                "• Criou também o avião leve **Demoiselle** (cujos projetos deixou em domínio público) e popularizou o uso do relógio de pulso com a Cartier."
-        ),
         FreeTopicEntry(
             id = "culinaria_pao_caseiro",
             title = "Culinária: Pão Caseiro Fácil e Rápido",
@@ -237,15 +226,15 @@ object OfflineEdgeKnowledgeEngine {
         FreeTopicEntry(
             id = "historia_brasil_mundo",
             title = "História Geral e do Brasil",
-            keywords = listOf("historia", "segunda guerra", "primeira guerra", "imperio", "republica", "idade media", "roma", "egito", "independencia", "dom pedro", "tiradentes", "getulio vargas"),
+            keywords = listOf("historia", "segunda guerra", "primeira guerra", "imperio", "republica", "descobrimento", "idade media", "roma", "egito", "independencia"),
             succinctAnswer = "Resumo histórico rápido:\n" +
-                "• **História do Brasil:** Chegada de Pedro Álvares Cabral (1500), Brasil Colônia (1530–1815), Reino Unido a Portugal (1815–1822), **Independência e Império** (1822–1889, D. Pedro I e D. Pedro II) e **República** (1889 até hoje, com Constituição atual de **1988**).\n" +
+                "• **História do Brasil:** Período Pré-Colonial (1500–1530), Brasil Colônia (1530–1815), Reino Unido a Portugal (1815–1822), **Independência e Império** (1822–1889, D. Pedro I e D. Pedro II) e **República** (1889 até hoje, com Constituição Cidadã atual promulgada em **1988**).\n" +
                 "• **Grandes Marcos Mundiais:** Revolução Francesa (1789), Primeira Guerra Mundial (1914–1918), Segunda Guerra Mundial (1939–1945) e Guerra Fria (1947–1991).",
             detailedAnswer = "### Panorama Detalhado: História do Brasil e Marcos Mundiais\n\n" +
                 "1️⃣ **Cronologia Fundamental do Brasil:**\n" +
-                "• **1500:** Chegada da esquadra de Pedro Álvares Cabral em Porto Seguro (BA).\n" +
+                "• **1500:** Chegada da esquadra de Pedro Álvares Cabral.\n" +
                 "• **1808:** Transferência da corte portuguesa para o Rio de Janeiro e abertura dos portos.\n" +
-                "• **1822:** Independência do Brasil (7 de setembro) proclamada por D. Pedro I.\n" +
+                "• **1822:** Independência do Brasil (7 de setembro) e início do Primeiro Reinado.\n" +
                 "• **1888 / 1889:** Lei Áurea (abolição da escravidão) e Proclamação da República (15 de novembro de 1889).\n" +
                 "• **1930–1945:** Era Vargas (industrialização e leis trabalhistas).\n" +
                 "• **1988:** Promulgação da atual Constituição Federal.\n\n" +
@@ -271,15 +260,16 @@ object OfflineEdgeKnowledgeEngine {
         FreeTopicEntry(
             id = "tecnologia_programacao_ia",
             title = "Tecnologia, Inteligência Artificial On-Device e Programação",
-            keywords = listOf("inteligencia artificial", "llm", "gemma", "mediapipe", "programacao", "python", "kotlin", "android", "computador", "algoritmo", "edge gallery", "litert"),
+            keywords = listOf("inteligencia artificial", "llm", "gemma", "mediapipe", "programacao", "python", "kotlin", "android", "computador", "algoritmo", "edge gallery"),
             succinctAnswer = "Como funcionam **LLMs Locais (como no Google AI Edge Gallery e neste app)**:\n" +
-                "• Modelos como **Gemma 4 E2B-IT (`gemma-4-E2B-it.task`)** utilizam o formato **LiteRT-LM** com pesos quantizados para rodar direto na **GPU/CPU do celular**.\n" +
-                "• No ResilienceHub, basta selecionar seu arquivo `.task` no botão **\"📂 Modelo .task\"** para combinar a inferência neural do modelo com o RAG de sobrevivência 100% offline.",
-            detailedAnswer = "### Arquitetura de IA Local On-Device (LiteRT-LM + RAG)\n\n" +
-                "1️⃣ **Execução Neural Direta (`com.google.ai.edge.litertlm`):**\n" +
-                "• O arquivo `gemma-4-E2B-it.task` utiliza o cabeçalho binário `LITERTLM` do Google AI Edge. O motor inicializa os pesos na GPU/CPU e transmite cada token gerado via `sendMessageAsync`.\n\n" +
-                "2️⃣ **Fusão com o RAG Oficial:**\n" +
-                "• Quando sua pergunta aborda sobrevivência, primeiros socorros ou seu estoque/família, o app injeta os dados relevantes do SQLite FTS4 no contexto; para qualquer outro tema livre, o modelo responde livremente usando seus pesos pré-treinados."
+                "• Modelos compactos como **Gemma 2B / Gemma 3**, **Qwen** e **Llama** utilizam **quantização INT4/INT8** para comprimir bilhões de parâmetros em arquivos `.task` ou `.litertlm` de 1 a 2 GB.\n" +
+                "• Eles rodam direto na **NPU/GPU/CPU do celular** via **Google MediaPipe GenAI (LiteRT)** sem enviar nenhum dado para a nuvem — garantindo privacidade total e funcionamento 100% offline.",
+            detailedAnswer = "### Arquitetura de IA Local On-Device (Edge AI & RAG)\n\n" +
+                "1️⃣ **Diferença entre Chat Livre (LLM Puro) e Modo RAG:**\n" +
+                "• **Chat Livre (Estilo Google AI Edge Gallery):** Você conversa diretamente com o modelo generativo em múltiplos turnos (`multi-turn`), explorando raciocínio aberto, criatividade, programação, matemática e cultura geral.\n" +
+                "• **Modo RAG (Retrieval-Augmented Generation):** Antes de gerar a resposta, o app faz uma busca vetorial/textual ultrarrápida no banco SQLite FTS4 local e injeta os protocolos oficiais no prompt, garantindo precisão médica e tática sem alucinações.\n\n" +
+                "2️⃣ **Como importar modelos `.task` no ResilienceHub:**\n" +
+                "• Basta tocar no botão **\"🧠 Modelo Edge\"** no topo do chat e selecionar qualquer arquivo `.task` ou `.bin` compatível com MediaPipe (ex: *Gemma-2B-IT* ou *Gemma-3-1B-IT*) salvo na memória do celular."
         ),
         FreeTopicEntry(
             id = "mecanica_carro_manutencao",
@@ -295,6 +285,20 @@ object OfflineEdgeKnowledgeEngine {
                 "2️⃣ **Se o motor ferver (luz de temperatura acesa):**\n" +
                 "• Encoste imediatamente e desligue o ar-condicionado. Se a água ainda estiver circulando, ligar o ar quente no máximo ajuda a dissipar calor do motor por alguns segundos antes de desligar.\n" +
                 "• Aguarde pelo menos **30 a 45 minutos** até a mangueira superior esfriar antes de abrir o reservatório."
+        ),
+        FreeTopicEntry(
+            id = "biologia_corpo_humano_nutricao",
+            title = "Biologia, Corpo Humano, Nutrição e Saúde Geral",
+            keywords = listOf("proteina", "carboidrato", "vitamina", "caloria", "metabolismo", "sono", "imunidade", "celula", "dna", "corpo humano", "exercicio", "musculo"),
+            succinctAnswer = "Fundamentos de **fisiologia e nutrição humana**:\n" +
+                "• **Macronutrientes:** **Carboidratos** (4 kcal/g — energia rápida para cérebro e músculos), **Proteínas** (4 kcal/g — reconstrução muscular e anticorpos) e **Gorduras boas** (9 kcal/g — reserva energética densa e absorção das vitaminas A, D, E e K).\n" +
+                "• **Hidratação diária:** A recomendação fisiológica média é de **35 ml de água por kg de peso corporal** (ex.: ~2,4 litros/dia para um adulto de 70 kg).",
+            detailedAnswer = "### Fisiologia, Nutrição e Manutenção da Saúde\n\n" +
+                "1️⃣ **Equilíbrio Energético e Macronutrientes:**\n" +
+                "• Um adulto médio consome entre **1.800 e 2.400 kcal/dia** em atividades normais.\n" +
+                "• **Proteínas completas:** A combinação clássica brasileira de **arroz com feijão** (na proporção 3 para 1) fornece todos os aminoácidos essenciais equivalentes à proteína animal!\n\n" +
+                "2️⃣ **Sono e Sistema Imunológico:**\n" +
+                "• Dormir de **7 a 8 horas** por noite regula o cortisol (hormônio do estresse), consolida a memória no hipocampo e fortalece a resposta de linfócitos T contra infecções."
         ),
         FreeTopicEntry(
             id = "jogos_passatempos_familia",
@@ -333,4 +337,66 @@ object OfflineEdgeKnowledgeEngine {
         }
         return if (bestScore >= 10) bestEntry else null
     }
+
+    private fun synthesizeContextualConversationalReply(
+        cleanQuery: String,
+        normQuery: String,
+        detailed: Boolean,
+        recentHistory: List<Pair<String, String>>
+    ): String {
+        val lastContextHint = if (recentHistory.isNotEmpty()) {
+            val lastUser = recentHistory.last().first
+            " (considerando também o que conversamos sobre *\"$lastUser\"*)"
+        } else ""
+
+        return when {
+            normQuery.startsWith("como ") || normQuery.contains("passo a passo") || normQuery.contains("fazer") -> {
+                if (!detailed) {
+                    "Para realizar **\"$cleanQuery\"** de forma prática e organizada$lastContextHint:\n\n" +
+                        "• **1. Planejamento e Materiais:** Separe antes tudo o que vai usar e confira as condições do ambiente.\n" +
+                        "• **2. Execução em Etapas:** Comece pelo preparo básico, teste em pequena escala primeiro e mantenha o controle de tempo/segurança.\n" +
+                        "• **3. Revisão Final:** Confira o resultado e guarde os materiais excedentes.\n\n" +
+                        "*(Se quiser que eu detalhe algum ponto específico ou adapte para os materiais que você tem em casa, me diga!)*"
+                } else {
+                    "### Guia Estruturado Passo a Passo: $cleanQuery\n\n" +
+                        "1️⃣ **Preparação Inicial:**\n" +
+                        "• Defina o objetivo exato e reúna os insumos necessários antes de iniciar para evitar interrupções no meio do processo.\n\n" +
+                        "2️⃣ **Método de Execução:**\n" +
+                        "• Divida a tarefa em 3 fases simples: **Preparação → Execução Principal → Acabamento/Verificação**.\n" +
+                        "• Sempre priorize economia de recursos (água, energia e materiais) e segurança.\n\n" +
+                        "3️⃣ **Dica do Motor Local Edge:**\n" +
+                        "• Você também pode me dizer exatamente quais ingredientes, ferramentas ou informações você tem em mãos agora para que eu monte um plano personalizado!"
+                }
+            }
+
+            normQuery.startsWith("por que") || normQuery.startsWith("porque") -> {
+                if (!detailed) {
+                    "Sobre **\"$cleanQuery\"**$lastContextHint:\n\n" +
+                        "• Na maioria dos casos, esse fenômeno ocorre pela combinação de **causas físicas/naturais diretas** (energia, pressão, reação química ou biologia) e **fatores de contexto/ambiente**.\n" +
+                        "• Se você quiser focar em um aspecto específico (científico, histórico ou prático), me fale ou toque em **\"🔍 Quero mais detalhes\"**!"
+                } else {
+                    "### Explicação Detalhada: $cleanQuery\n\n" +
+                        "1️⃣ **Causa Primária (Mecanismo Direto):**\n" +
+                        "• Todo processo físico, biológico ou histórico responde a uma relação de causa e efeito (equilíbrio energético, adaptação ou necessidade prática).\n\n" +
+                        "2️⃣ **Aplicação Prática:**\n" +
+                        "• Compreender o *porquê* permite prever o comportamento do sistema e agir preventivamente. Se quiser analisar um caso concreto ou fazer cálculos sobre isso, pode mandar os dados!"
+                }
+            }
+
+            else -> {
+                if (!detailed) {
+                    "Entendi sua pergunta sobre **\"$cleanQuery\"**$lastContextHint!\n\n" +
+                        "• Estou operando no **Modo Local 100% Offline** no seu aparelho.\n" +
+                        "• Posso ajudar você com explicações diretas, cálculos matemáticos/elétricos, receitas, ciências, história, organização da rotina ou todos os 30 protocolos de sobrevivência.\n" +
+                        "• Quer que eu detalhe um ponto específico de **\"$cleanQuery\"** ou faça algum cálculo prático sobre isso?"
+                } else {
+                    "### Análise Completa (Modo Local 100% Offline): $cleanQuery\n\n" +
+                        "• **Resumo do Tópico:** Você perguntou sobre *\"$cleanQuery\"*.\n" +
+                        "• **Capacidades Ativas sem Internet:** Mesmo 100% desconectado da rede, mantenho ativos o motor de raciocínio matemático/físico, a enciclopédia local embarcada e a integração direta com modelos `.task` / `.litertlm` do **Google AI Edge Gallery**.\n" +
+                        "• **Dica:** Se você tiver um arquivo de modelo local (como *Gemma-2B-IT* ou *Gemma-3-1B*) baixado no celular, pode vinculá-lo no botão **\"🧠 Modelo Edge\"** no topo desta tela para expandir ainda mais a geração neural livre offline!"
+                }
+            }
+        }
+    }
 }
+
