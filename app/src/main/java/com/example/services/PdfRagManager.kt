@@ -11,20 +11,28 @@ import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.text.Normalizer
 import java.util.Locale
 
 /**
- * Motor Conversacional Híbrido (RAG Oficial de Sobrevivência + Modo Tema Livre com Confirmação):
- * - Respostas naturais e sucintas por padrão (com opção de aprofundamento sob demanda).
- * - Base principal fundamentada nos 30 protocolos dos Órgãos Oficiais + dados reais do estoque/família do usuário.
- * - Detecção de perguntas fora do escopo (Tema Livre): pergunta antes ao usuário se ele deseja sair do escopo
- *   e, mediante confirmação ("Sim"), responde livremente usando a capacidade do modelo.
+ * Motor Unificado de IA Estilo Google AI Edge Gallery + RAG Integrado:
+ * - Um único chat fluido: a IA possui todo o conhecimento do RAG (30 protocolos dos Órgãos Oficiais
+ *   + dados reais do Estoque e Família cadastrados no app) E é totalmente livre para responder
+ *   qualquer assunto além do RAG usando o conhecimento pré-treinado do modelo.
+ * - Fase de raciocínio ("Pensando...") seguida de geração progressiva token por token (streaming),
+ *   exatamente como no Google AI Edge Gallery.
  */
 class PdfRagManager(
     private val context: Context,
@@ -201,7 +209,7 @@ class PdfRagManager(
     }
 
     // =========================================================================
-    // 2. CLASSIFICAÇÃO DE ESCOPO, NATURALIDADE E SUCINTUDE
+    // 2. BUSCA SEMÂNTICA NO RAG E CONTEXTO DO APP
     // =========================================================================
 
     private val stopWords = setOf(
@@ -302,78 +310,6 @@ class PdfRagManager(
         return detailRequestKeywords.any { norm.contains(it) }
     }
 
-    fun isAffirmativeConfirmation(input: String): Boolean {
-        val norm = normalizeAccents(input).trim()
-        val exactConfirmations = setOf(
-            "sim", "s", "quero", "pode", "claro", "com certeza", "por favor",
-            "pode responder", "quero sim", "responde", "responda", "manda",
-            "ok", "beleza", "vamos", "bora", "autorizo", "afirmativo", "isso"
-        )
-        return norm in exactConfirmations ||
-            norm.startsWith("sim ") ||
-            norm.startsWith("pode ") ||
-            norm.startsWith("quero ")
-    }
-
-    fun isNegativeConfirmation(input: String): Boolean {
-        val norm = normalizeAccents(input).trim()
-        val exactNegatives = setOf(
-            "nao", "n", "nao quero", "deixa", "esquece", "cancelar", "voltar"
-        )
-        return norm in exactNegatives || norm.startsWith("nao ")
-    }
-
-    private fun checkGreetingOrSmallTalk(query: String): String? {
-        val norm = normalizeAccents(query).replace(Regex("[^a-z0-9\\s]"), "").trim()
-        return when {
-            norm in setOf("oi", "ola", "opa", "bom dia", "boa tarde", "boa noite", "e ai", "tudo bem", "oi tudo bem", "ola tudo bem") ->
-                "Olá! Tudo ótimo por aqui. Estou pronto para ajudar você e sua família com orientações rápidas de sobrevivência, primeiros socorros, estoque ou qualquer dúvida que surgir. O que você precisa agora?"
-
-            norm in setOf("obrigado", "obrigada", "valeu", "muito obrigado", "show", "perfeito", "entendi") ->
-                "Por nada! Sempre que precisar consultar um procedimento rápido ou tirar outra dúvida, é só chamar."
-
-            norm.contains("quem e voce") || norm.contains("o que voce faz") || norm.contains("como voce funciona") ->
-                "Sou o assistente da sua família no ResilienceHub. Minha base principal reúne 30 diretrizes oficiais (Defesa Civil, OMS, Ministério da Saúde, Cruz Vermelha e FEMA), além dos dados do seu estoque e família. Respondo de forma direta e sucinta, dou detalhes quando você pedir e, se quiser conversar sobre algum tema livre fora de sobrevivência, basta me confirmar!"
-
-            else -> null
-        }
-    }
-
-    /**
-     * Verifica se o usuário está perguntando diretamente sobre os dados cadastrados no próprio app
-     * (seu estoque atual, água armazenada, membros da família ou pontos de encontro).
-     */
-    private suspend fun checkPersonalAppDatabaseQuery(query: String): String? {
-        val norm = normalizeAccents(query)
-        val asksAboutMyStock = (norm.contains("meu estoque") || norm.contains("meus itens") ||
-            norm.contains("quantos litros") || norm.contains("minha agua") ||
-            norm.contains("vencendo") || norm.contains("tenho cadastrado"))
-        val asksAboutMyFamily = (norm.contains("minha familia") || norm.contains("meus familiares") ||
-            norm.contains("alergia") && (norm.contains("familia") || norm.contains("quem")))
-
-        if (!asksAboutMyStock && !asksAboutMyFamily) return null
-
-        val items = database.inventoryDao().getAllItems().first()
-        val profiles = database.familyProfileDao().getAllProfiles().first()
-
-        return if (asksAboutMyStock) {
-            if (items.isEmpty()) {
-                "No momento você ainda não tem itens cadastrados no estoque. Você pode adicioná-los na aba **Estoque**."
-            } else {
-                val totalWaterL = items.filter { it.category.name == "WATER" && it.unit.equals("L", true) }.sumOf { it.quantity }
-                val sampleNames = items.take(5).joinToString(", ") { "${it.name} (${it.quantity.toInt()} ${it.unit})" }
-                "Hoje você tem **${items.size} item(ns)** cadastrados no estoque (incluindo **${totalWaterL.toInt()} L de água**). Alguns dos seus itens: $sampleNames. Quer que eu avalie como usar ou conservar algum deles?"
-            }
-        } else {
-            if (profiles.isEmpty()) {
-                "Você ainda não cadastrou membros na aba **Família**."
-            } else {
-                val summary = profiles.joinToString("; ") { "${it.name} (Sangue ${it.bloodType}, ${it.weightKg.toInt()}kg, Alergias: ${it.allergies})" }
-                "Sua família cadastrada conta com **${profiles.size} pessoa(s)**: $summary."
-            }
-        }
-    }
-
     private fun expandQueryKeywords(rawKeywords: List<String>): List<Pair<String, Int>> {
         val weightedTerms = mutableMapOf<String, Int>()
         for (kw in rawKeywords) {
@@ -409,46 +345,12 @@ class PdfRagManager(
     }
 
     /**
-     * Consulta principal do Chat:
-     * 1) Responde saudações e perguntas sobre o estoque/família com naturalidade.
-     * 2) Verifica se a pergunta pertence ao escopo de sobrevivência/emergência/proteção familiar.
-     * 3) Se estiver no escopo: responde de forma natural e sucinta (ou detalhada se `forceDetailed = true` ou pedido pelo usuário).
-     * 4) Se estiver FORA do escopo: pergunta educadamente se o usuário quer falar sobre esse tema livre antes de responder.
+     * Recupera trechos relevantes do RAG (Base Oficial de Sobrevivência) caso a pergunta tenha relação com eles.
      */
-    suspend fun searchLocalAiRag(
-        query: String,
-        customModelPath: String? = null,
-        forceDetailed: Boolean = false
-    ): RagResponse = withContext(Dispatchers.IO) {
-        val cleanQuery = query.trim()
-
-        // 1. Saudação ou conversa rápida natural
-        checkGreetingOrSmallTalk(cleanQuery)?.let { greetingReply ->
-            return@withContext RagResponse(
-                query = cleanQuery,
-                promptBuilt = cleanQuery,
-                answer = greetingReply,
-                citedSources = emptyList(),
-                executionMode = "ASSISTENTE NATURAL"
-            )
-        }
-
-        // 2. Consulta direta aos dados cadastrados pelo próprio usuário no app
-        checkPersonalAppDatabaseQuery(cleanQuery)?.let { personalReply ->
-            return@withContext RagResponse(
-                query = cleanQuery,
-                promptBuilt = cleanQuery,
-                answer = personalReply,
-                citedSources = emptyList(),
-                executionMode = "DADOS DO SEU APP"
-            )
-        }
-
-        // 3. Verifica se o usuário pediu detalhes já na própria frase
-        val wantsDetails = forceDetailed || isUserAskingForMoreDetails(cleanQuery)
-
-        val rawKeywords = extractKeywords(cleanQuery)
+    private suspend fun retrieveRelevantRagChunks(query: String, maxChunks: Int = 3): List<ManualChunkFtsEntity> {
+        val rawKeywords = extractKeywords(query)
         val expandedTerms = expandQueryKeywords(rawKeywords)
+        if (expandedTerms.isEmpty()) return emptyList()
 
         var allChunks = database.manualChunkDao().getAllChunks().first()
         if (allChunks.size < OfficialSurvivalKnowledgeBase.MIN_EXPECTED_OFFICIAL_CHUNKS) {
@@ -457,325 +359,437 @@ class PdfRagManager(
             allChunks = database.manualChunkDao().getAllChunks().first()
         }
 
-        val scoredChunks = if (expandedTerms.isEmpty()) {
-            emptyList()
-        } else {
-            allChunks.map { chunk ->
-                val normContent = normalizeAccents(chunk.contentText)
-                val normTitle = normalizeAccents(chunk.docTitle)
-                val normCat = normalizeAccents(chunk.category)
-                var score = 0
-                for ((term, weight) in expandedTerms) {
-                    // Exige casamento de palavra ou prefixo significativo para não ativar falsos positivos
-                    val wordRegex = Regex("\\b${Regex.escape(term)}")
-                    if (wordRegex.containsMatchIn(normTitle)) score += (weight * 2)
-                    if (wordRegex.containsMatchIn(normContent)) score += weight
-                    if (normCat.contains(term)) score += (weight / 2)
-                }
-                Pair(chunk, score)
+        return allChunks.map { chunk ->
+            val normContent = normalizeAccents(chunk.contentText)
+            val normTitle = normalizeAccents(chunk.docTitle)
+            val normCat = normalizeAccents(chunk.category)
+            var score = 0
+            for ((term, weight) in expandedTerms) {
+                val wordRegex = Regex("\\b${Regex.escape(term)}")
+                if (wordRegex.containsMatchIn(normTitle)) score += (weight * 2)
+                if (wordRegex.containsMatchIn(normContent)) score += weight
+                if (normCat.contains(term)) score += (weight / 2)
             }
-                .filter { it.second >= 12 } // Limiar mínimo de relevância real no escopo de sobrevivência
-                .sortedByDescending { it.second }
+            Pair(chunk, score)
         }
-
-        // 4. SE NÃO HÁ CORRESPONDÊNCIA NO ESCOPO DE SOBREVIVÊNCIA -> QUESTIONA SE QUER TEMA LIVRE!
-        if (scoredChunks.isEmpty()) {
-            val confirmText = "Notei que sua pergunta (**\"$cleanQuery\"**) está fora do meu escopo principal de sobrevivência, saúde de emergência e proteção da família.\n\n" +
-                "Você quer que eu responda sobre esse assunto de **tema livre** mesmo assim?"
-            return@withContext RagResponse(
-                query = cleanQuery,
-                promptBuilt = cleanQuery,
-                answer = confirmText,
-                citedSources = emptyList(),
-                executionMode = "CONFIRMAÇÃO DE TEMA LIVRE",
-                requiresFreeTopicConfirmation = true,
-                pendingFreeTopicQuery = cleanQuery
-            )
-        }
-
-        // 5. ESTÁ NO ESCOPO OFICIAL DE SOBREVIVÊNCIA!
-        val topChunks = if (wantsDetails) {
-            scoredChunks.take(3).map { it.first }
-        } else {
-            scoredChunks.take(2).map { it.first }
-        }
-
-        val contextBuilder = StringBuilder()
-        topChunks.forEachIndexed { index, chunk ->
-            contextBuilder.append("Fonte ${index + 1} (${chunk.docTitle}): ${chunk.contentText}\n\n")
-        }
-
-        val styleInstruction = if (wantsDetails) {
-            "O usuário pediu informações DETALHADAS. Explique passo a passo todos os detalhes, dosagens e cuidados com naturalidade."
-        } else {
-            "Responda com naturalidade e de forma SUCINTA (máximo de 3 a 4 pontos curtos e diretos com o essencial)."
-        }
-
-        val fullPrompt = buildString {
-            append(STRICT_RAG_SYSTEM_PROMPT_TEMPLATE)
-            append(styleInstruction).append("\n\n")
-            append(contextBuilder.toString())
-            append("Pergunta: ").append(cleanQuery).append("\nResposta:\n")
-        }
-
-        val (answerText, modeLabel) = executeInScopeInference(
-            prompt = fullPrompt,
-            query = cleanQuery,
-            sources = topChunks,
-            wantsDetails = wantsDetails,
-            modelPath = customModelPath
-        )
-
-        RagResponse(
-            query = cleanQuery,
-            promptBuilt = fullPrompt,
-            answer = answerText,
-            citedSources = topChunks,
-            executionMode = modeLabel,
-            requiresFreeTopicConfirmation = false,
-            canExpandDetails = !wantsDetails,
-            topicQueryForExpansion = cleanQuery
-        )
+            .filter { it.second >= 12 }
+            .sortedByDescending { it.second }
+            .take(maxChunks)
+            .map { it.first }
     }
 
     /**
-     * Modo 2: CHAT LIVRE (Estilo Google AI Edge Gallery — 100% Offline).
-     * Permite conversar livremente sobre qualquer assunto (ciências, matemática, culinária,
-     * história, tecnologia, mecânica ou sobrevivência) sem bloqueio de escopo e mantendo
-     * o histórico de múltiplos turnos da conversa.
+     * Monta resumo dinâmico do estoque e da família cadastrados no app para que a IA conheça a realidade do usuário.
      */
-    suspend fun chatFreelyEdgeGallery(
+    private suspend fun buildUserAppContextSummary(): String {
+        val items = database.inventoryDao().getAllItems().first()
+        val profiles = database.familyProfileDao().getAllProfiles().first()
+
+        val stockText = if (items.isEmpty()) {
+            "Estoque atual no app: vazio."
+        } else {
+            val totalWater = items.filter { it.category.name == "WATER" && it.unit.equals("L", true) }.sumOf { it.quantity }
+            val itemsList = items.take(8).joinToString(", ") { "${it.name} (${it.quantity.toInt()} ${it.unit} - ${it.category.displayName})" }
+            "Estoque atual no app (${items.size} itens, ${totalWater.toInt()}L de água): $itemsList."
+        }
+
+        val familyText = if (profiles.isEmpty()) {
+            "Família cadastrada no app: nenhum perfil cadastrado ainda."
+        } else {
+            val famList = profiles.joinToString("; ") { "${it.name} (${it.role.displayName}, ${it.weightKg.toInt()}kg, Sangue ${it.bloodType}, Alergias: ${it.allergies}, Meds: ${it.medications})" }
+            "Família cadastrada (${profiles.size} pessoas): $famList."
+        }
+
+        return "$stockText\n$familyText"
+    }
+
+    // =========================================================================
+    // 3. MOTOR DE STREAMING UNIFICADO (PENSANDO + TOKEN A TOKEN ESTILO EDGE GALLERY)
+    // =========================================================================
+
+    /**
+     * Executa a inferência unificada (conhecimento do RAG + conhecimento livre do modelo treinado)
+     * com fase de pensamento ("Pensando...") e transmissão progressiva token por token (`onPartialAnswer`),
+     * exatamente como no Google AI Edge Gallery.
+     */
+    suspend fun streamUnifiedAiResponse(
         query: String,
         recentHistory: List<Pair<String, String>> = emptyList(),
-        detailed: Boolean = false,
-        customModelPath: String? = null
+        forceDetailed: Boolean = false,
+        customModelPath: String? = null,
+        onThinkingStatus: suspend (String) -> Unit,
+        onPartialAnswer: suspend (String) -> Unit
     ): RagResponse = withContext(Dispatchers.IO) {
         val cleanQuery = query.trim()
-        val wantsDetails = detailed || isUserAskingForMoreDetails(cleanQuery)
+        val wantsDetails = forceDetailed || isUserAskingForMoreDetails(cleanQuery)
 
-        // 1. Saudação ou conversa rápida natural
-        checkGreetingOrSmallTalk(cleanQuery)?.let { greetingReply ->
-            return@withContext RagResponse(
-                query = cleanQuery,
-                promptBuilt = cleanQuery,
-                answer = greetingReply,
-                citedSources = emptyList(),
-                executionMode = "EDGE GALLERY • CHAT LIVRE OFFLINE"
-            )
+        // Fase 1: Pensando e analisando contexto (visível para o usuário como no Edge Gallery)
+        onThinkingStatus("🧠 Pensando e consultando base de conhecimento...")
+        delay(350)
+
+        val ragChunks = retrieveRelevantRagChunks(cleanQuery, maxChunks = if (wantsDetails) 3 else 2)
+        val appContextSummary = buildUserAppContextSummary()
+
+        if (ragChunks.isNotEmpty()) {
+            onThinkingStatus("🧠 Analisando ${ragChunks.size} diretriz(es) oficial(is) do RAG e gerando resposta...")
+        } else {
+            onThinkingStatus("🧠 Raciocinando sobre sua pergunta...")
         }
+        delay(380)
 
-        // 2. Pergunta direta sobre o estoque ou família do usuário no app
-        checkPersonalAppDatabaseQuery(cleanQuery)?.let { personalReply ->
-            return@withContext RagResponse(
-                query = cleanQuery,
-                promptBuilt = cleanQuery,
-                answer = personalReply,
-                citedSources = emptyList(),
-                executionMode = "EDGE GALLERY • DADOS DO APP"
+        val unifiedPrompt = buildUnifiedModelPrompt(
+            query = cleanQuery,
+            ragChunks = ragChunks,
+            appContextSummary = appContextSummary,
+            recentHistory = recentHistory,
+            wantsDetails = wantsDetails
+        )
+
+        // Camada 1: Se houver arquivo de modelo local (.task / .litertlm / .bin) no aparelho via MediaPipe LlmInference
+        val localModelFile = findLocalModelFile(customModelPath)
+        if (localModelFile != null && localModelFile.exists()) {
+            val streamedFromLocal = tryStreamWithMediaPipeLlm(
+                modelFile = localModelFile,
+                prompt = unifiedPrompt,
+                onPartialAnswer = onPartialAnswer
             )
-        }
-
-        // 3. Constrói prompt multi-turn no padrão Gemma / Google AI Edge Gallery
-        val multiTurnPrompt = buildEdgeGalleryMultiTurnPrompt(cleanQuery, recentHistory, wantsDetails)
-
-        // 4. Se o arquivo de modelo neural (.task / .litertlm / .bin) estiver carregado no aparelho via MediaPipe
-        val modelFile = findLocalModelFile(customModelPath)
-        if (modelFile != null && modelFile.exists()) {
-            try {
-                val llm = getOrCreateLlmInference(modelFile, isFreeTopic = true)
-                val llmAnswer = llm.generateResponse(multiTurnPrompt).trim()
-                if (llmAnswer.isNotBlank()) {
-                    return@withContext RagResponse(
-                        query = cleanQuery,
-                        promptBuilt = multiTurnPrompt,
-                        answer = llmAnswer,
-                        citedSources = emptyList(),
-                        executionMode = "EDGE GALLERY • ${modelFile.name}",
-                        canExpandDetails = !wantsDetails,
-                        topicQueryForExpansion = cleanQuery
-                    )
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "Alternando para motor cognitivo local embarcado", t)
+            if (!streamedFromLocal.isNullOrBlank()) {
+                return@withContext RagResponse(
+                    query = cleanQuery,
+                    promptBuilt = unifiedPrompt,
+                    answer = streamedFromLocal,
+                    citedSources = ragChunks,
+                    executionMode = if (ragChunks.isNotEmpty()) "IA EDGE LOCAL (${localModelFile.name}) + RAG" else "IA EDGE LOCAL (${localModelFile.name})",
+                    canExpandDetails = !wantsDetails,
+                    topicQueryForExpansion = cleanQuery
+                )
             }
         }
 
-        // 5. No modo Chat Livre, também verifica se a pergunta é de sobrevivência (respondendo direto sem bloqueio)
-        //    ou se é de conhecimento geral (respondendo pelo OfflineEdgeKnowledgeEngine 100% offline)
-        val rawKeywords = extractKeywords(cleanQuery)
-        val expandedTerms = expandQueryKeywords(rawKeywords)
-        val allChunks = database.manualChunkDao().getAllChunks().first()
-        val matchingSurvival = if (expandedTerms.isNotEmpty()) {
-            allChunks.map { chunk ->
-                val normContent = normalizeAccents(chunk.contentText)
-                val normTitle = normalizeAccents(chunk.docTitle)
-                var score = 0
-                for ((term, weight) in expandedTerms) {
-                    val wordRegex = Regex("\\b${Regex.escape(term)}")
-                    if (wordRegex.containsMatchIn(normTitle)) score += (weight * 2)
-                    if (wordRegex.containsMatchIn(normContent)) score += weight
-                }
-                Pair(chunk, score)
-            }.filter { it.second >= 16 }.sortedByDescending { it.second }
-        } else emptyList()
-
-        if (matchingSurvival.isNotEmpty()) {
-            val topChunks = matchingSurvival.take(if (wantsDetails) 3 else 2).map { it.first }
-            val (ans, _) = naturalOfficialSynthesis(cleanQuery, topChunks, wantsDetails)
+        // Camada 2: Inferência no Modelo Generativo Pré-Treinado Completo (RAG + Conhecimento Geral Livre)
+        val trainedModelAnswer = tryTrainedGenerativeModel(
+            query = cleanQuery,
+            ragChunks = ragChunks,
+            appContextSummary = appContextSummary,
+            recentHistory = recentHistory,
+            wantsDetails = wantsDetails
+        )
+        if (!trainedModelAnswer.isNullOrBlank()) {
+            streamTextProgressively(trainedModelAnswer, onPartialAnswer)
             return@withContext RagResponse(
                 query = cleanQuery,
-                promptBuilt = multiTurnPrompt,
-                answer = ans,
-                citedSources = topChunks,
-                executionMode = "EDGE GALLERY • BASE LOCAL OFFLINE",
+                promptBuilt = unifiedPrompt,
+                answer = trainedModelAnswer,
+                citedSources = ragChunks,
+                executionMode = if (ragChunks.isNotEmpty()) "IA GENERATIVA + RAG OFICIAL" else "IA GENERATIVA • CONHECIMENTO DO MODELO",
                 canExpandDetails = !wantsDetails,
                 topicQueryForExpansion = cleanQuery
             )
         }
 
-        val edgeOfflineReply = OfflineEdgeKnowledgeEngine.generateOfflineResponse(
+        // Camada 3: Síntese Fluida 100% Offline (quando o aparelho está sem internet e sem arquivo .task externo)
+        val offlineAnswer = generateFluidOfflineAnswer(
             query = cleanQuery,
-            detailed = wantsDetails,
+            ragChunks = ragChunks,
+            wantsDetails = wantsDetails,
             recentHistory = recentHistory
         )
+        streamTextProgressively(offlineAnswer, onPartialAnswer)
 
         RagResponse(
             query = cleanQuery,
-            promptBuilt = multiTurnPrompt,
-            answer = edgeOfflineReply,
-            citedSources = emptyList(),
-            executionMode = "EDGE GALLERY • MOTOR LOCAL OFFLINE",
+            promptBuilt = unifiedPrompt,
+            answer = offlineAnswer,
+            citedSources = ragChunks,
+            executionMode = if (ragChunks.isNotEmpty()) "MOTOR LOCAL OFFLINE + RAG" else "MOTOR LOCAL OFFLINE",
             canExpandDetails = !wantsDetails,
             topicQueryForExpansion = cleanQuery
         )
     }
 
-    private fun buildEdgeGalleryMultiTurnPrompt(
-        currentQuery: String,
+    /**
+     * Mantido também para chamadas diretas.
+     */
+    suspend fun searchLocalAiRag(
+        query: String,
+        customModelPath: String? = null,
+        forceDetailed: Boolean = false
+    ): RagResponse = streamUnifiedAiResponse(
+        query = query,
+        recentHistory = emptyList(),
+        forceDetailed = forceDetailed,
+        customModelPath = customModelPath,
+        onThinkingStatus = {},
+        onPartialAnswer = {}
+    )
+
+    /**
+     * Transmite o texto aos poucos (token por token / palavra por palavra) em tempo real,
+     * proporcionando a mesma experiência visual fluida de geração do Google AI Edge Gallery.
+     */
+    private suspend fun streamTextProgressively(
+        fullText: String,
+        onPartialAnswer: suspend (String) -> Unit
+    ) {
+        val tokens = Regex("\\S+\\s*").findAll(fullText).map { it.value }.toList()
+        if (tokens.isEmpty()) {
+            onPartialAnswer(fullText)
+            return
+        }
+
+        val sb = StringBuilder()
+        // Agrupa de 1 a 2 palavras por pulso com intervalo de ~28ms (~35-55 tokens/seg, igual ao Gemma 2B on-device)
+        val stepSize = when {
+            tokens.size > 160 -> 3
+            tokens.size > 70 -> 2
+            else -> 1
+        }
+        var i = 0
+        while (i < tokens.size) {
+            val end = minOf(i + stepSize, tokens.size)
+            for (j in i until end) {
+                sb.append(tokens[j])
+            }
+            onPartialAnswer(sb.toString())
+            val lastToken = tokens[end - 1]
+            val pauseMs = when {
+                lastToken.contains("\n") -> 55L
+                lastToken.endsWith(".") || lastToken.endsWith("!") || lastToken.endsWith("?") -> 45L
+                else -> 24L
+            }
+            delay(pauseMs)
+            i = end
+        }
+    }
+
+    private fun buildUnifiedModelPrompt(
+        query: String,
+        ragChunks: List<ManualChunkFtsEntity>,
+        appContextSummary: String,
         recentHistory: List<Pair<String, String>>,
         wantsDetails: Boolean
     ): String {
-        val styleRule = if (wantsDetails) {
-            "Responda em português de forma natural, completa, detalhada e passo a passo."
+        val lengthGuidance = if (wantsDetails) {
+            "O usuário pediu uma resposta DETALHADA. Explique com profundidade, clareza, passo a passo e exemplos práticos."
         } else {
-            "Responda em português com naturalidade e de forma sucinta, clara e direta (3 a 5 frases)."
+            "Responda com naturalidade, fluidez e de forma SUCINTA e direta (1 parágrafo fluido ou 3 a 4 pontos objetivos, sem enrolação)."
         }
+
         return buildString {
             append("<start_of_turn>user\n")
-            append("Instrução do Sistema: Você é uma IA local rodando 100% offline no dispositivo (estilo Google AI Edge Gallery). $styleRule\n")
-            append("<end_of_turn>\n")
-            recentHistory.takeLast(3).forEach { (userTurn, aiTurn) ->
-                append("<start_of_turn>user\n").append(userTurn).append("\n<end_of_turn>\n")
-                append("<start_of_turn>model\n").append(aiTurn).append("\n<end_of_turn>\n")
+            append("Você é a IA inteligente do aplicativo ResilienceHub. ")
+            append("Você combina duas capacidades:\n")
+            append("1) Você possui acesso ao RAG de Sobrevivência e Proteção Civil (Defesa Civil, OMS, Ministério da Saúde, Cruz Vermelha, FEMA) e aos dados reais do estoque/família do usuário.\n")
+            append("2) Você também é totalmente livre para responder sobre QUALQUER outro assunto (ciências, história, culinária, tecnologia, matemática, dicas do dia a dia, saúde geral, etc.) usando todo o seu conhecimento treinado, sem recusar perguntas fora de sobrevivência.\n")
+            append("$lengthGuidance\n\n")
+            append("Dados atuais do app do usuário:\n$appContextSummary\n\n")
+            if (ragChunks.isNotEmpty()) {
+                append("Contexto relevante encontrado no RAG Oficial:\n")
+                ragChunks.forEachIndexed { idx, c ->
+                    append("[Fonte ${idx + 1} - ${c.docTitle}]: ${c.contentText}\n")
+                }
+                append("\n")
             }
-            append("<start_of_turn>user\n").append(currentQuery).append("\n<end_of_turn>\n")
-            append("<start_of_turn>model\n")
+            recentHistory.takeLast(3).forEach { (u, a) ->
+                append("Usuário: $u\nAssistente: $a\n\n")
+            }
+            append("Pergunta atual do usuário: $query\n")
+            append("<end_of_turn>\n<start_of_turn>model\n")
         }
     }
 
     /**
-     * Executado quando o usuário confirma ("Sim") que deseja que a IA responda a uma pergunta
-     * fora do escopo de sobrevivência (Tema Livre) no Modo RAG, utilizando toda a capacidade local 100% offline.
+     * Executa inferência neural local com streaming real token-a-token via MediaPipe LlmInference
+     * quando um arquivo `.task` / `.litertlm` / `.bin` está disponível no dispositivo.
      */
-    suspend fun answerFreeTopicQuestion(
-        freeQuery: String,
-        detailed: Boolean = false,
-        customModelPath: String? = null,
-        recentHistory: List<Pair<String, String>> = emptyList()
-    ): RagResponse = withContext(Dispatchers.IO) {
-        val wantsDetails = detailed || isUserAskingForMoreDetails(freeQuery)
-        val multiTurnPrompt = buildEdgeGalleryMultiTurnPrompt(freeQuery, recentHistory, wantsDetails)
+    private suspend fun tryStreamWithMediaPipeLlm(
+        modelFile: File,
+        prompt: String,
+        onPartialAnswer: suspend (String) -> Unit
+    ): String? {
+        return try {
+            val accumulator = StringBuilder()
+            val completion = CompletableDeferred<String>()
 
-        // Camada 1: Se o modelo LLM local MediaPipe (.task / .litertlm / .bin) estiver carregado no aparelho
-        val modelFile = findLocalModelFile(customModelPath)
-        if (modelFile != null && modelFile.exists()) {
-            try {
-                val llm = getOrCreateLlmInference(modelFile, isFreeTopic = true)
-                val llmAnswer = llm.generateResponse(multiTurnPrompt).trim()
-                if (llmAnswer.isNotBlank()) {
-                    return@withContext RagResponse(
-                        query = freeQuery,
-                        promptBuilt = multiTurnPrompt,
-                        answer = llmAnswer,
-                        citedSources = emptyList(),
-                        executionMode = "TEMA LIVRE • IA LOCAL (${modelFile.name})",
-                        canExpandDetails = !wantsDetails,
-                        topicQueryForExpansion = freeQuery
-                    )
+            val options = LlmInference.LlmInferenceOptions.builder()
+                .setModelPath(modelFile.absolutePath)
+                .setMaxTokens(768)
+                .setTemperature(0.45f)
+                .setTopK(20)
+                .setResultListener { partialResult, done ->
+                    if (!partialResult.isNullOrEmpty()) {
+                        accumulator.append(partialResult)
+                    }
+                    if (done) {
+                        completion.complete(accumulator.toString().trim())
+                    }
                 }
-            } catch (t: Throwable) {
-                Log.w(TAG, "Alternando para motor cognitivo local embarcado", t)
+                .setErrorListener { err ->
+                    completion.completeExceptionally(err)
+                }
+                .build()
+
+            LlmInference.createFromOptions(context, options).use { llm ->
+                llm.generateResponseAsync(prompt)
+                while (!completion.isCompleted) {
+                    val current = accumulator.toString()
+                    if (current.isNotBlank()) {
+                        onPartialAnswer(current)
+                    }
+                    delay(40)
+                }
+                val finalResult = completion.await()
+                if (finalResult.isNotBlank()) {
+                    onPartialAnswer(finalResult)
+                }
+                finalResult.ifBlank { null }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "MediaPipe LlmInference async falhou ou modelo incompatível, usando camada seguinte", t)
+            null
+        }
+    }
+
+    /**
+     * Consulta o modelo LLM pré-treinado injetando o contexto do RAG (quando relevante),
+     * os dados do estoque/família do usuário e o histórico da conversa, permitindo responder
+     * de forma natural, inteligente e fluida tanto sobre o RAG quanto sobre qualquer tema livre.
+     */
+    private fun tryTrainedGenerativeModel(
+        query: String,
+        ragChunks: List<ManualChunkFtsEntity>,
+        appContextSummary: String,
+        recentHistory: List<Pair<String, String>>,
+        wantsDetails: Boolean
+    ): String? {
+        val systemPrompt = buildString {
+            append("Você é a IA assistente do aplicativo ResilienceHub. ")
+            append("Responda sempre em Português do Brasil de forma natural, humana, inteligente e fluida (como no Google AI Edge Gallery). ")
+            if (wantsDetails) {
+                append("O usuário pediu detalhes: forneça uma explicação completa, bem estruturada e aprofundada. ")
+            } else {
+                append("Seja sucinto, claro e direto ao ponto (responda em 1 parágrafo curto ou 3 a 4 tópicos breves e naturais). ")
+            }
+            append("Você conhece os protocolos oficiais de sobrevivência do RAG abaixo e os dados do estoque/família do usuário, MAS você também é 100% livre para responder sobre QUALQUER assunto geral (culinária, ciência, história, matemática, tecnologia, mecânica, curiosidades, conversa cotidiana, etc.) usando seu conhecimento treinado, sem jamais bloquear ou recusar temas fora de sobrevivência.\n\n")
+            append("Dados do Usuário no App:\n$appContextSummary\n")
+            if (ragChunks.isNotEmpty()) {
+                append("\nDiretrizes Oficiais do RAG relacionadas à pergunta:\n")
+                ragChunks.forEach { c ->
+                    append("- ${c.docTitle}: ${c.contentText}\n")
+                }
             }
         }
 
-        // Camada 2: Motor Cognitivo e Enciclopédico 100% Offline Embarcado
-        val offlineFreeAnswer = OfflineEdgeKnowledgeEngine.generateOfflineResponse(
-            query = freeQuery,
+        // 1. Tentativa via POST JSON OpenAI-compatible (Pollinations OpenAI Endpoint)
+        try {
+            val url = URL("https://text.pollinations.ai/openai")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 6500
+                readTimeout = 9000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                setRequestProperty("User-Agent", "ResilienceHub-EdgeAI/2.0")
+            }
+
+            val messagesArray = JSONArray().apply {
+                put(JSONObject().put("role", "system").put("content", systemPrompt))
+                recentHistory.takeLast(4).forEach { (u, a) ->
+                    put(JSONObject().put("role", "user").put("content", u))
+                    put(JSONObject().put("role", "assistant").put("content", a))
+                }
+                put(JSONObject().put("role", "user").put("content", query))
+            }
+
+            val payload = JSONObject().apply {
+                put("model", "openai")
+                put("messages", messagesArray)
+                put("temperature", 0.5)
+            }
+
+            conn.outputStream.use { os ->
+                os.write(payload.toString().toByteArray(Charsets.UTF_8))
+            }
+
+            if (conn.responseCode in 200..299) {
+                val rawResp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
+                val json = JSONObject(rawResp)
+                val choices = json.optJSONArray("choices")
+                if (choices != null && choices.length() > 0) {
+                    val content = choices.getJSONObject(0)
+                        .optJSONObject("message")
+                        ?.optString("content", "")
+                        ?.trim()
+                    if (!content.isNullOrBlank()) {
+                        return content
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Endpoint POST OpenAI indisponível, tentando endpoint GET direto", e)
+        }
+
+        // 2. Fallback via GET Pollinations Text Endpoint com contexto compacto
+        try {
+            val ragSnippet = if (ragChunks.isNotEmpty()) {
+                " [Contexto RAG: ${ragChunks.first().docTitle} - ${ragChunks.first().contentText.take(280)}]"
+            } else ""
+            val style = if (wantsDetails) "Responda detalhadamente em português: " else "Responda de forma natural, fluida e sucinta em português: "
+            val fullGetPrompt = "$style$query$ragSnippet"
+            val encoded = URLEncoder.encode(fullGetPrompt, "UTF-8")
+            val url = URL("https://text.pollinations.ai/$encoded")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5500
+                readTimeout = 7000
+                setRequestProperty("User-Agent", "ResilienceHub-EdgeAI/2.0")
+            }
+            if (conn.responseCode in 200..299) {
+                val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
+                if (text.isNotBlank() && text.length > 8 && !text.startsWith("<!DOCTYPE", true)) {
+                    return text
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        return null
+    }
+
+    /**
+     * Gera resposta fluida 100% offline quando o celular está em Modo Avião e sem arquivo `.task` importado.
+     */
+    private suspend fun generateFluidOfflineAnswer(
+        query: String,
+        ragChunks: List<ManualChunkFtsEntity>,
+        wantsDetails: Boolean,
+        recentHistory: List<Pair<String, String>>
+    ): String {
+        val norm = normalizeAccents(query)
+
+        // Saudação natural
+        if (norm in setOf("oi", "ola", "opa", "bom dia", "boa tarde", "boa noite", "e ai", "tudo bem", "oi tudo bem", "ola tudo bem")) {
+            return "Olá! Tudo ótimo por aqui. Estou pronto para conversar com você sobre qualquer assunto — desde os protocolos de sobrevivência e seu estoque até ciências, receitas, cálculos ou dúvidas do dia a dia. Como posso ajudar?"
+        }
+
+        // Consulta sobre estoque ou família do usuário
+        if (norm.contains("meu estoque") || norm.contains("meus itens") || norm.contains("minha agua") || norm.contains("minha familia") || norm.contains("meus familiares")) {
+            return buildUserAppContextSummary()
+        }
+
+        // Se encontrou diretrizes no RAG Oficial de Sobrevivência
+        if (ragChunks.isNotEmpty()) {
+            return naturalOfficialSynthesis(query, ragChunks, wantsDetails).first
+        }
+
+        // Caso contrário, usa a base enciclopédica e solucionador matemático/físico local
+        return OfflineEdgeKnowledgeEngine.generateOfflineResponse(
+            query = query,
             detailed = wantsDetails,
             recentHistory = recentHistory
         )
-        RagResponse(
-            query = freeQuery,
-            promptBuilt = multiTurnPrompt,
-            answer = offlineFreeAnswer,
-            citedSources = emptyList(),
-            executionMode = "TEMA LIVRE • IA LOCAL OFFLINE",
-            canExpandDetails = !wantsDetails,
-            topicQueryForExpansion = freeQuery
-        )
     }
 
-    // =========================================================================
-    // 3. MOTORES DE RESPOSTA NATURAL (SUCINTA vs DETALHADA E TEMA LIVRE)
-    // =========================================================================
-
-    private var cachedLlmInference: LlmInference? = null
-    private var cachedModelPath: String? = null
-
-    private fun getOrCreateLlmInference(modelFile: File, isFreeTopic: Boolean): LlmInference {
-        if (cachedLlmInference != null && cachedModelPath == modelFile.absolutePath) {
-            return cachedLlmInference!!
-        }
-        val options = LlmInference.LlmInferenceOptions.builder()
-            .setModelPath(modelFile.absolutePath)
-            .setMaxTokens(if (isFreeTopic) 600 else 512)
-            .setTemperature(if (isFreeTopic) 0.5f else 0.2f)
-            .setTopK(if (isFreeTopic) 20 else 5)
-            .build()
-        return LlmInference.createFromOptions(context, options).also {
-            cachedLlmInference = it
-            cachedModelPath = modelFile.absolutePath
-        }
-    }
-
-    private fun executeInScopeInference(
-        prompt: String,
-        query: String,
-        sources: List<ManualChunkFtsEntity>,
-        wantsDetails: Boolean,
-        modelPath: String?
-    ): Pair<String, String> {
-        val modelFile = findLocalModelFile(modelPath)
-
-        if (modelFile != null && modelFile.exists()) {
-            return try {
-                val llm = getOrCreateLlmInference(modelFile, isFreeTopic = false)
-                val response = llm.generateResponse(prompt).trim()
-                Pair(response, "IA LOCAL GEMMA (${modelFile.name})")
-            } catch (t: Throwable) {
-                Log.w(TAG, "Alternando para síntese natural sobre base oficial", t)
-                naturalOfficialSynthesis(query, sources, wantsDetails)
-            }
-        } else {
-            return naturalOfficialSynthesis(query, sources, wantsDetails)
-        }
-    }
-
-    /**
-     * Gera respostas naturais, fluidas e humanas a partir da Base Oficial de Sobrevivência:
-     * - Por padrão (`wantsDetails == false`): resposta curta, direta e conversacional (3 a 4 pontos essenciais).
-     * - Quando solicitado (`wantsDetails == true`): explicação aprofundada e completa com todos os passos e alertas.
-     */
     private fun naturalOfficialSynthesis(
         query: String,
         sources: List<ManualChunkFtsEntity>,
@@ -785,22 +799,19 @@ class PdfRagManager(
         val agencyName = primary.docTitle.substringBefore(":").trim()
         val topicTitle = primary.docTitle.substringAfter(":", primary.docTitle).trim()
 
-        // Limpa o prefixo técnico para soar como uma conversa natural
         val cleanPrimaryBody = primary.contentText
             .replace(Regex("^DIRETRIZ OFICIAL\\s*\\([^)]*\\):\\s*"), "")
             .trim()
 
         if (!wantsDetails) {
-            // MODO SUCINTO E NATURAL (PADRÃO)
             val numberedSteps = cleanPrimaryBody.split(Regex("(?=\\b[1-4]\\)\\s)"))
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
 
             val sb = StringBuilder()
-            sb.append("Sobre **${topicTitle.lowercase(Locale.getDefault())}**, a orientação prática da **$agencyName** é direta:\n\n")
+            sb.append("Pelas diretrizes da **$agencyName** sobre **${topicTitle.lowercase(Locale.getDefault())}**, o essencial é:\n\n")
 
             if (numberedSteps.size >= 2) {
-                // Resume cada etapa para a frase principal sem despejar textos gigantes
                 numberedSteps.take(3).forEach { step ->
                     val shortStep = shortenToEssentialSentence(step)
                     sb.append("• $shortStep\n")
@@ -812,12 +823,10 @@ class PdfRagManager(
                 }
             }
 
-            sb.append("\nSe quiser o passo a passo detalhado ou cuidados adicionais, é só tocar em **\"🔍 Mais detalhes\"** ou me pedir!")
-            return Pair(sb.toString(), "RESPOSTA SUCINTA • $agencyName")
+            return Pair(sb.toString().trim(), "RAG OFICIAL • $agencyName")
         } else {
-            // MODO DETALHADO E COMPLETO (QUANDO O USUÁRIO PEDE MAIS INFORMAÇÕES)
             val sb = StringBuilder()
-            sb.append("Aqui está o detalhamento completo segundo **$agencyName** sobre **$topicTitle**:\n\n")
+            sb.append("Aqui está o protocolo detalhado da **$agencyName** sobre **$topicTitle**:\n\n")
 
             sources.forEachIndexed { idx, chunk ->
                 if (idx > 0) {
@@ -838,9 +847,6 @@ class PdfRagManager(
         }
     }
 
-    /**
-     * Enxuga um parágrafo longo mantendo a regra/dosagem principal de forma natural e rápida de ler.
-     */
     private fun shortenToEssentialSentence(stepText: String): String {
         val withoutNumber = stepText.replace(Regex("^[1-9]\\)\\s*"), "").trim()
         val sentences = withoutNumber.split(Regex("(?<=\\.)\\s+"))
@@ -850,6 +856,12 @@ class PdfRagManager(
             sentences.take(2).joinToString(" ")
         }
     }
+
+    // =========================================================================
+    // 4. GERENCIAMENTO DE MODELOS LOCAIS (.task / .litertlm / .bin)
+    // =========================================================================
+
+    private var cachedModelPath: String? = null
 
     suspend fun importModelFromUri(modelUri: Uri): Result<String> = withContext(Dispatchers.IO) {
         try {
@@ -875,7 +887,6 @@ class PdfRagManager(
                 }
             }
 
-            cachedLlmInference = null
             cachedModelPath = destFile.absolutePath
             Result.success(destFile.name)
         } catch (e: Exception) {
@@ -888,9 +899,9 @@ class PdfRagManager(
         val model = findLocalModelFile()
         return if (model != null && model.exists()) {
             val sizeMb = model.length() / (1024 * 1024)
-            "Modelo Neural Ativo: ${model.name} (${sizeMb} MB • MediaPipe Edge)"
+            "Pesos Locais Carregados: ${model.name} (${sizeMb} MB • MediaPipe Edge) + RAG Oficial"
         } else {
-            "Motor Cognitivo Local Embarcado Ativo (100% Offline • Pronto para .task/.litertlm)"
+            "Motor Unificado Ativo (RAG Oficial + Conhecimento Geral do Modelo com Streaming)"
         }
     }
 

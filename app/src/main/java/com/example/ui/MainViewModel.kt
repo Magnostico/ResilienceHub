@@ -53,7 +53,9 @@ data class ChatMessage(
     val pendingFreeTopicQuery: String? = null,
     val canExpandDetails: Boolean = false,
     val topicQueryForExpansion: String? = null,
-    val isFreeTopic: Boolean = false
+    val isFreeTopic: Boolean = false,
+    val isStreaming: Boolean = false,
+    val thinkingStatus: String? = null
 )
 
 /**
@@ -139,11 +141,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         private fun createWelcomeMessage(): ChatMessage = ChatMessage(
             id = "welcome_msg",
-            text = "Olá! Estou pronto para ajudar você e sua família.\n\n" +
-                "Respondo de forma direta e sucinta com base nos **protocolos oficiais de sobrevivência** (Defesa Civil, OMS, Ministério da Saúde, Cruz Vermelha e FEMA), e posso aprofundar os detalhes sempre que você pedir.\n\n" +
-                "Se quiser conversar sobre qualquer **tema livre** fora de sobrevivência, também posso responder — basta me confirmar quando eu perguntar!",
+            text = "Olá! Sou a IA unificada do **ResilienceHub**.\n\n" +
+                "Tenho todo o conhecimento do **RAG de Sobrevivência** (30 protocolos da Defesa Civil, OMS, Ministério da Saúde, Cruz Vermelha e FEMA) e do seu estoque/família, e também sou **totalmente livre para conversar sobre qualquer outro assunto** com o conhecimento completo do modelo!",
             isUser = false,
-            executionMode = "ASSISTENTE NATURAL • OFICIAL + TEMA LIVRE"
+            executionMode = "IA EDGE + RAG UNIFICADO"
         )
     }
 
@@ -602,12 +603,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Envia uma pergunta no Chat:
-     * - No MODO CHAT LIVRE (Estilo Google AI Edge Gallery, `_ragModeAi.value == false`):
-     *   conversa livremente 100% offline sobre qualquer assunto sem bloqueio de escopo.
-     * - No MODO RAG (`_ragModeAi.value == true`):
-     *   usa a Base Oficial de Sobrevivência (30 protocolos) + estoque/família, e pede confirmação
-     *   antes de responder perguntas fora do escopo.
+     * Envia uma pergunta no Chat Unificado:
+     * - Combina automaticamente o conhecimento do RAG (quando relevante) com a capacidade livre
+     *   do modelo treinado para responder sobre qualquer assunto.
+     * - Exibe fase de raciocínio ("Pensando...") e transmite a resposta aos poucos (token a token),
+     *   igual ao Google AI Edge Gallery.
      */
     fun askRagQuestion(question: String) {
         val cleanQuestion = question.trim()
@@ -618,194 +618,78 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             text = cleanQuestion,
             isUser = true
         )
-        _chatMessages.value = _chatMessages.value + userMessage
+        val streamingAiId = UUID.randomUUID().toString()
+        val placeholderAiMessage = ChatMessage(
+            id = streamingAiId,
+            text = "",
+            isUser = false,
+            executionMode = "PROCESSANDO...",
+            isStreaming = true,
+            thinkingStatus = "🧠 Pensando e analisando contexto..."
+        )
+        _chatMessages.value = _chatMessages.value + userMessage + placeholderAiMessage
 
         viewModelScope.launch {
             _isRagLoading.value = true
 
-            // MODO CHAT LIVRE (ESTILO GOOGLE AI EDGE GALLERY — 100% OFFLINE)
-            if (!_ragModeAi.value) {
-                pendingFreeTopicQuestion = null
-                val lastTopic = lastAnsweredTopicQuery
-                val isShortFollowUpForDetails = lastTopic != null &&
-                    pdfRagManager.isUserAskingForMoreDetails(cleanQuestion) &&
-                    cleanQuestion.split(Regex("\\s+")).size <= 6
-
-                val response = if (isShortFollowUpForDetails && lastTopic != null) {
-                    pdfRagManager.chatFreelyEdgeGallery(
-                        query = lastTopic,
-                        recentHistory = recentHistory,
-                        detailed = true
-                    )
-                } else {
-                    lastAnsweredTopicQuery = cleanQuestion
-                    lastAnsweredWasFreeTopic = true
-                    pdfRagManager.chatFreelyEdgeGallery(
-                        query = cleanQuestion,
-                        recentHistory = recentHistory,
-                        detailed = false
-                    )
-                }
-
-                _ragResponse.value = response
-                _chatMessages.value = _chatMessages.value + ChatMessage(
-                    text = response.answer,
-                    isUser = false,
-                    executionMode = response.executionMode,
-                    citedSources = response.citedSources,
-                    canExpandDetails = response.canExpandDetails,
-                    topicQueryForExpansion = response.topicQueryForExpansion,
-                    isFreeTopic = true
-                )
-                _isRagLoading.value = false
-                return@launch
-            }
-
-            // MODO RAG (PROTOCOLOS DE SOBREVIVÊNCIA + CONFIRMAÇÃO DE TEMA LIVRE)
-            // 1. Verifica se está aguardando confirmação de Tema Livre ("Sim" / "Não")
-            val pendingFree = pendingFreeTopicQuestion
-            if (pendingFree != null) {
-                if (pdfRagManager.isAffirmativeConfirmation(cleanQuestion)) {
-                    pendingFreeTopicQuestion = null
-                    lastAnsweredTopicQuery = pendingFree
-                    lastAnsweredWasFreeTopic = true
-                    val freeResp = pdfRagManager.answerFreeTopicQuestion(
-                        freeQuery = pendingFree,
-                        detailed = false,
-                        recentHistory = recentHistory
-                    )
-                    _ragResponse.value = freeResp
-                    _chatMessages.value = _chatMessages.value + ChatMessage(
-                        text = freeResp.answer,
-                        isUser = false,
-                        executionMode = freeResp.executionMode,
-                        citedSources = emptyList(),
-                        canExpandDetails = freeResp.canExpandDetails,
-                        topicQueryForExpansion = pendingFree,
-                        isFreeTopic = true
-                    )
-                    _isRagLoading.value = false
-                    return@launch
-                } else if (pdfRagManager.isNegativeConfirmation(cleanQuestion)) {
-                    pendingFreeTopicQuestion = null
-                    _chatMessages.value = _chatMessages.value + ChatMessage(
-                        text = "Combinado! Mantemos o foco na proteção, saúde e sobrevivência da sua família. O que você gostaria de consultar?",
-                        isUser = false,
-                        executionMode = "FOCO EM SOBREVIVÊNCIA"
-                    )
-                    _isRagLoading.value = false
-                    return@launch
-                } else {
-                    // O usuário fez uma pergunta nova em vez de responder sim/não
-                    pendingFreeTopicQuestion = null
-                }
-            }
-
-            // 2. Verifica se o usuário pediu apenas "mais detalhes / explique melhor" sobre o último assunto
             val lastTopic = lastAnsweredTopicQuery
             val isShortFollowUpForDetails = lastTopic != null &&
                 pdfRagManager.isUserAskingForMoreDetails(cleanQuestion) &&
                 cleanQuestion.split(Regex("\\s+")).size <= 6
 
-            if (isShortFollowUpForDetails && lastTopic != null) {
-                val detailedResp = if (lastAnsweredWasFreeTopic) {
-                    pdfRagManager.answerFreeTopicQuestion(
-                        freeQuery = lastTopic,
-                        detailed = true,
-                        recentHistory = recentHistory
-                    )
-                } else {
-                    pdfRagManager.searchLocalAiRag(lastTopic, forceDetailed = true)
-                }
-                _ragResponse.value = detailedResp
-                _chatMessages.value = _chatMessages.value + ChatMessage(
-                    text = detailedResp.answer,
-                    isUser = false,
-                    executionMode = detailedResp.executionMode,
-                    citedSources = detailedResp.citedSources,
-                    canExpandDetails = false,
-                    isFreeTopic = lastAnsweredWasFreeTopic
-                )
-                _isRagLoading.value = false
-                return@launch
-            }
-
-            // 3. Fluxo normal (avalia escopo de sobrevivência vs tema livre)
-            val response = pdfRagManager.searchLocalAiRag(cleanQuestion)
-            _ragResponse.value = response
-
-            if (response.requiresFreeTopicConfirmation) {
-                pendingFreeTopicQuestion = response.pendingFreeTopicQuery ?: cleanQuestion
-            } else {
+            val targetQuery = if (isShortFollowUpForDetails && lastTopic != null) lastTopic else cleanQuestion
+            val forceDetailed = isShortFollowUpForDetails && lastTopic != null
+            if (!forceDetailed) {
                 lastAnsweredTopicQuery = cleanQuestion
-                lastAnsweredWasFreeTopic = false
             }
 
-            val aiMessage = ChatMessage(
-                text = response.answer,
-                isUser = false,
-                executionMode = response.executionMode,
-                citedSources = response.citedSources,
-                requiresFreeTopicConfirmation = response.requiresFreeTopicConfirmation,
-                pendingFreeTopicQuery = response.pendingFreeTopicQuery,
-                canExpandDetails = response.canExpandDetails,
-                topicQueryForExpansion = response.topicQueryForExpansion,
-                isFreeTopic = false
+            val finalResp = pdfRagManager.streamUnifiedAiResponse(
+                query = targetQuery,
+                recentHistory = recentHistory,
+                forceDetailed = forceDetailed,
+                onThinkingStatus = { statusText ->
+                    _chatMessages.value = _chatMessages.value.map { msg ->
+                        if (msg.id == streamingAiId) msg.copy(thinkingStatus = statusText) else msg
+                    }
+                },
+                onPartialAnswer = { partialText ->
+                    _chatMessages.value = _chatMessages.value.map { msg ->
+                        if (msg.id == streamingAiId) {
+                            msg.copy(
+                                text = partialText,
+                                thinkingStatus = null,
+                                executionMode = "GERANDO RESPOSTA..."
+                            )
+                        } else msg
+                    }
+                }
             )
-            _chatMessages.value = _chatMessages.value + aiMessage
+
+            _ragResponse.value = finalResp
+            _chatMessages.value = _chatMessages.value.map { msg ->
+                if (msg.id == streamingAiId) {
+                    msg.copy(
+                        text = finalResp.answer,
+                        isStreaming = false,
+                        thinkingStatus = null,
+                        executionMode = finalResp.executionMode,
+                        citedSources = finalResp.citedSources,
+                        canExpandDetails = finalResp.canExpandDetails,
+                        topicQueryForExpansion = finalResp.topicQueryForExpansion,
+                        isFreeTopic = finalResp.citedSources.isEmpty()
+                    )
+                } else msg
+            }
             _isRagLoading.value = false
         }
     }
 
-    /**
-     * Chamado quando o usuário toca no botão "✅ Sim, pode responder" de uma pergunta de Tema Livre.
-     */
     fun confirmFreeTopicQuestion(freeQuery: String) {
-        val target = freeQuery.ifBlank { pendingFreeTopicQuestion ?: return }
-        pendingFreeTopicQuestion = null
-        lastAnsweredTopicQuery = target
-        lastAnsweredWasFreeTopic = true
-
-        // Desativa os botões de confirmação na mensagem anterior para evitar clique duplo
-        _chatMessages.value = _chatMessages.value.map {
-            if (it.requiresFreeTopicConfirmation) it.copy(requiresFreeTopicConfirmation = false) else it
-        } + ChatMessage(
-            text = "Sim, pode responder sobre isso.",
-            isUser = true
-        )
-
-        viewModelScope.launch {
-            _isRagLoading.value = true
-            val freeResp = pdfRagManager.answerFreeTopicQuestion(target, detailed = false)
-            _ragResponse.value = freeResp
-            _chatMessages.value = _chatMessages.value + ChatMessage(
-                text = freeResp.answer,
-                isUser = false,
-                executionMode = freeResp.executionMode,
-                citedSources = emptyList(),
-                canExpandDetails = freeResp.canExpandDetails,
-                topicQueryForExpansion = target,
-                isFreeTopic = true
-            )
-            _isRagLoading.value = false
-        }
+        askRagQuestion(freeQuery)
     }
 
-    /**
-     * Chamado quando o usuário toca no botão "❌ Não, voltar ao foco" de uma pergunta de Tema Livre.
-     */
     fun rejectFreeTopicQuestion() {
         pendingFreeTopicQuestion = null
-        _chatMessages.value = _chatMessages.value.map {
-            if (it.requiresFreeTopicConfirmation) it.copy(requiresFreeTopicConfirmation = false) else it
-        } + ChatMessage(
-            text = "Não, vamos manter o foco em sobrevivência.",
-            isUser = true
-        ) + ChatMessage(
-            text = "Perfeito! Continuo focado na proteção e preparação da sua família. Qual protocolo ou item você quer consultar?",
-            isUser = false,
-            executionMode = "FOCO EM SOBREVIVÊNCIA"
-        )
     }
 
     /**
@@ -813,29 +697,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun requestMoreDetailsOnTopic(topicQuery: String, isFreeTopic: Boolean) {
         if (topicQuery.isBlank()) return
+        val recentHistory = buildRecentConversationHistory()
+        val streamingAiId = UUID.randomUUID().toString()
+
         _chatMessages.value = _chatMessages.value.map {
             if (it.topicQueryForExpansion == topicQuery) it.copy(canExpandDetails = false) else it
         } + ChatMessage(
             text = "Quero mais detalhes sobre isso.",
             isUser = true
+        ) + ChatMessage(
+            id = streamingAiId,
+            text = "",
+            isUser = false,
+            executionMode = "APROFUNDANDO...",
+            isStreaming = true,
+            thinkingStatus = "🧠 Elaborando explicação detalhada..."
         )
 
         viewModelScope.launch {
             _isRagLoading.value = true
-            val detailedResp = if (isFreeTopic) {
-                pdfRagManager.answerFreeTopicQuestion(topicQuery, detailed = true)
-            } else {
-                pdfRagManager.searchLocalAiRag(topicQuery, forceDetailed = true)
-            }
-            _ragResponse.value = detailedResp
-            _chatMessages.value = _chatMessages.value + ChatMessage(
-                text = detailedResp.answer,
-                isUser = false,
-                executionMode = detailedResp.executionMode,
-                citedSources = detailedResp.citedSources,
-                canExpandDetails = false,
-                isFreeTopic = isFreeTopic
+            val detailedResp = pdfRagManager.streamUnifiedAiResponse(
+                query = topicQuery,
+                recentHistory = recentHistory,
+                forceDetailed = true,
+                onThinkingStatus = { statusText ->
+                    _chatMessages.value = _chatMessages.value.map { msg ->
+                        if (msg.id == streamingAiId) msg.copy(thinkingStatus = statusText) else msg
+                    }
+                },
+                onPartialAnswer = { partialText ->
+                    _chatMessages.value = _chatMessages.value.map { msg ->
+                        if (msg.id == streamingAiId) {
+                            msg.copy(
+                                text = partialText,
+                                thinkingStatus = null,
+                                executionMode = "GERANDO DETALHES..."
+                            )
+                        } else msg
+                    }
+                }
             )
+
+            _ragResponse.value = detailedResp
+            _chatMessages.value = _chatMessages.value.map { msg ->
+                if (msg.id == streamingAiId) {
+                    msg.copy(
+                        text = detailedResp.answer,
+                        isStreaming = false,
+                        thinkingStatus = null,
+                        executionMode = detailedResp.executionMode,
+                        citedSources = detailedResp.citedSources,
+                        canExpandDetails = false,
+                        isFreeTopic = detailedResp.citedSources.isEmpty()
+                    )
+                } else msg
+            }
             _isRagLoading.value = false
         }
     }

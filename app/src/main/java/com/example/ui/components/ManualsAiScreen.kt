@@ -83,8 +83,9 @@ fun ManualsAiScreen(
         uri?.let { viewModel.importModelFromUri(it) }
     }
 
-    // Rola automaticamente para a última mensagem sempre que uma nova resposta chegar no Chat
-    LaunchedEffect(state.chatMessages.size, state.isRagLoading) {
+    // Rola automaticamente conforme a mensagem vai sendo escrita aos poucos (streaming token a token)
+    val lastMsgTextLen = state.chatMessages.lastOrNull()?.text?.length ?: 0
+    LaunchedEffect(state.chatMessages.size, lastMsgTextLen) {
         if (showChatView && state.chatMessages.isNotEmpty()) {
             listState.animateScrollToItem(state.chatMessages.size - 1)
         }
@@ -95,7 +96,7 @@ fun ManualsAiScreen(
             .fillMaxSize()
             .testTag("manuals_ai_screen")
     ) {
-        // --- 1. BARRA SUPERIOR DO CHAT DE SOBREVIVÊNCIA OFICIAL ---
+        // --- 1. BARRA SUPERIOR UNIFICADA DO CHAT IA (RAG + CONHECIMENTO GERAL DO MODELO) ---
         Surface(
             color = if (crisisMode) Color.Black else Color(0xFF111827),
             border = BorderStroke(1.dp, Color(0xFF1E293B)),
@@ -107,43 +108,27 @@ fun ManualsAiScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    // Alternador entre Chat IA e Base Oficial
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterChip(
-                            selected = showChatView,
-                            onClick = { showChatView = true },
-                            label = {
-                                Text(
-                                    "💬 Chat IA Oficial",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = if (showChatView) Color(0xFF090D16) else Color.White
-                                )
-                            },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = Color(0xFFFBBF24),
-                                containerColor = Color(0xFF1E293B)
-                            ),
-                            modifier = Modifier.testTag("tab_chat_view")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = Color(0xFF34D399),
+                            modifier = Modifier.size(18.dp)
                         )
-
-                        FilterChip(
-                            selected = !showChatView,
-                            onClick = { showChatView = false },
-                            label = {
-                                Text(
-                                    "📚 Base Oficial (${state.manualChunks.size})",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (!showChatView) Color(0xFF090D16) else Color(0xFFCBD5E1)
-                                )
-                            },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = Color(0xFF34D399),
-                                containerColor = Color(0xFF1E293B)
-                            ),
-                            modifier = Modifier.testTag("tab_knowledge_base_view")
-                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Column {
+                            Text(
+                                text = if (showChatView) "IA ResilienceHub (RAG + Tema Livre)" else "Base RAG (${state.manualChunks.size} diretrizes)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "Conhecimento oficial do RAG + Modelo livre para qualquer assunto",
+                                fontSize = 10.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
                     }
 
                     Row(
@@ -153,15 +138,29 @@ fun ManualsAiScreen(
                         if (showChatView && state.chatMessages.size > 1) {
                             IconButton(
                                 onClick = { viewModel.clearChatHistory() },
-                                modifier = Modifier.size(32.dp)
+                                modifier = Modifier.size(30.dp)
                             ) {
                                 Icon(
                                     Icons.Default.Refresh,
-                                    contentDescription = "Nova Conversa",
+                                    contentDescription = "Limpar Conversa",
                                     tint = Color(0xFFCBD5E1),
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(17.dp)
                                 )
                             }
+                        }
+
+                        IconButton(
+                            onClick = { showChatView = !showChatView },
+                            modifier = Modifier
+                                .size(30.dp)
+                                .testTag("tab_knowledge_base_view")
+                        ) {
+                            Icon(
+                                if (showChatView) Icons.Default.MenuBook else Icons.Default.Chat,
+                                contentDescription = "Ver Base RAG / Voltar ao Chat",
+                                tint = Color(0xFFFBBF24),
+                                modifier = Modifier.size(17.dp)
+                            )
                         }
 
                         OutlinedButton(
@@ -170,129 +169,19 @@ fun ManualsAiScreen(
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             modifier = Modifier
-                                .height(30.dp)
+                                .height(28.dp)
                                 .testTag("btn_import_model")
                         ) {
                             Icon(
                                 Icons.Default.Memory,
                                 contentDescription = null,
                                 tint = Color(0xFFC084FC),
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(13.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Modelo Edge", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFC084FC))
+                            Text(".task", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFC084FC))
                         }
                     }
-                }
-
-                // --- SELETOR DE MODO DA IA LOCAL: MODO RAG vs CHAT LIVRE (ESTILO GOOGLE AI EDGE GALLERY) ---
-                if (showChatView) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        val isRag = state.ragModeAi
-                        Surface(
-                            onClick = { viewModel.setRagModeAi(true) },
-                            color = if (isRag) Color(0xFF062E22) else Color(0xFF0F172A),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(
-                                width = if (isRag) 1.5.dp else 1.dp,
-                                color = if (isRag) Color(0xFF34D399) else Color(0xFF334155)
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("mode_selector_rag")
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Shield,
-                                    contentDescription = null,
-                                    tint = if (isRag) Color(0xFF34D399) else Color(0xFF94A3B8),
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Column {
-                                    Text(
-                                        text = "Modo RAG (Oficial)",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (isRag) Color(0xFF34D399) else Color.White
-                                    )
-                                    Text(
-                                        text = "Protocolos + Seu Estoque",
-                                        fontSize = 9.sp,
-                                        color = Color(0xFF94A3B8)
-                                    )
-                                }
-                            }
-                        }
-
-                        Surface(
-                            onClick = { viewModel.setRagModeAi(false) },
-                            color = if (!isRag) Color(0xFF2E1065) else Color(0xFF0F172A),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(
-                                width = if (!isRag) 1.5.dp else 1.dp,
-                                color = if (!isRag) Color(0xFFA855F7) else Color(0xFF334155)
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("mode_selector_free_edge")
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    tint = if (!isRag) Color(0xFFC084FC) else Color(0xFF94A3B8),
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Column {
-                                    Text(
-                                        text = "Chat Livre (Edge Gallery)",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (!isRag) Color(0xFFC084FC) else Color.White
-                                    )
-                                    Text(
-                                        text = "Conversa Aberta 100% Offline",
-                                        fontSize = 9.sp,
-                                        color = Color(0xFFCBD5E1)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Selo de Status Offline
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(top = 5.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .background(if (state.ragModeAi) Color(0xFF34D399) else Color(0xFFC084FC), CircleShape)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (state.ragModeAi)
-                            "100% Offline • RAG Ativo: Defesa Civil • OMS • Min. Saúde • Cruz Vermelha • FEMA"
-                        else
-                            "100% Offline • Modo Google AI Edge Gallery: Converse livremente sobre qualquer assunto",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF94A3B8)
-                    )
                 }
 
                 state.pdfImportStatus?.let { status ->
@@ -336,61 +225,27 @@ fun ManualsAiScreen(
                         onRequestMoreDetails = { query, isFree -> viewModel.requestMoreDetailsOnTopic(query, isFree) }
                     )
                 }
-
-                if (state.isRagLoading) {
-                    item {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .padding(8.dp)
-                                .background(Color(0xFF111827), RoundedCornerShape(12.dp))
-                                .padding(horizontal = 14.dp, vertical = 10.dp)
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = Color(0xFF34D399)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = "Consultando protocolos dos órgãos oficiais...",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF34D399)
-                            )
-                        }
-                    }
-                }
             }
 
-            // --- BARRA DE TEMAS RÁPIDOS + CAMPO DE MENSAGEM ---
-            val activeQuickPrompts = if (state.ragModeAi) OFFICIAL_QUICK_PROMPTS else EDGE_GALLERY_FREE_PROMPTS
+            // --- BARRA DE SUGESTÕES RÁPIDAS + CAMPO DE MENSAGEM UNIFICADO ---
+            val combinedQuickPrompts = remember { OFFICIAL_QUICK_PROMPTS.take(6) + EDGE_GALLERY_FREE_PROMPTS.take(5) }
             Surface(
                 color = if (crisisMode) Color.Black else Color(0xFF0F172A),
                 border = BorderStroke(1.dp, Color(0xFF1E293B)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
-                    Text(
-                        text = if (state.ragModeAi)
-                            "Toque rápido em uma emergência (Modo RAG) ou digite sua pergunta:"
-                        else
-                            "Sugestões de Chat Livre (Estilo Edge Gallery 100% Offline):",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (state.ragModeAi) Color(0xFFFBBF24) else Color(0xFFC084FC),
-                        modifier = Modifier.padding(bottom = 4.dp, start = 2.dp)
-                    )
-
                     LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.padding(bottom = 8.dp)
                     ) {
-                        items(activeQuickPrompts) { prompt ->
+                        items(combinedQuickPrompts) { prompt ->
                             SuggestionChip(
                                 onClick = {
-                                    viewModel.askRagQuestion(prompt.fullQuestion)
-                                    focusManager.clearFocus()
+                                    if (!state.isRagLoading) {
+                                        viewModel.askRagQuestion(prompt.fullQuestion)
+                                        focusManager.clearFocus()
+                                    }
                                 },
                                 label = {
                                     Text(
@@ -420,10 +275,7 @@ fun ManualsAiScreen(
                             onValueChange = { chatInput = it },
                             placeholder = {
                                 Text(
-                                    if (state.ragModeAi)
-                                        "Pergunte no Modo RAG (ex: purificar água, meu estoque...)"
-                                    else
-                                        "Converse livremente 100% offline (ciência, receitas, contas...)",
+                                    "Pergunte qualquer coisa à IA (sobrevivência, estoque ou tema livre...)",
                                     fontSize = 12.sp,
                                     color = Color(0xFF94A3B8)
                                 )
@@ -729,8 +581,7 @@ private fun ChatMessageBubble(
                 1.dp,
                 when {
                     message.isUser -> Color(0xFFFBBF24)
-                    message.requiresFreeTopicConfirmation -> Color(0xFF38BDF8)
-                    message.isFreeTopic -> Color(0xFFA855F7)
+                    message.isStreaming -> Color(0xFF38BDF8)
                     else -> Color(0xFF10B981)
                 }
             ),
@@ -745,15 +596,11 @@ private fun ChatMessageBubble(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = when {
-                                message.isUser -> Icons.Default.Person
-                                message.isFreeTopic -> Icons.Default.AutoAwesome
-                                else -> Icons.Default.Shield
-                            },
+                            imageVector = if (message.isUser) Icons.Default.Person else Icons.Default.AutoAwesome,
                             contentDescription = null,
                             tint = when {
                                 message.isUser -> Color(0xFF090D16)
-                                message.isFreeTopic -> Color(0xFFC084FC)
+                                message.isStreaming -> Color(0xFF38BDF8)
                                 else -> Color(0xFF34D399)
                             },
                             modifier = Modifier.size(14.dp)
@@ -762,14 +609,16 @@ private fun ChatMessageBubble(
                         Text(
                             text = when {
                                 message.isUser -> "Você"
-                                message.isFreeTopic -> "IA Modo Tema Livre"
-                                else -> "IA Defesa Civil & Sobrevivência"
+                                message.thinkingStatus != null -> "IA ResilienceHub • Pensando..."
+                                message.isStreaming -> "IA ResilienceHub • Respondendo..."
+                                message.citedSources.isNotEmpty() -> "IA ResilienceHub (RAG Oficial)"
+                                else -> "IA ResilienceHub"
                             },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = when {
                                 message.isUser -> Color(0xFF090D16)
-                                message.isFreeTopic -> Color(0xFFC084FC)
+                                message.isStreaming -> Color(0xFF38BDF8)
                                 else -> Color(0xFF34D399)
                             }
                         )
@@ -785,56 +634,46 @@ private fun ChatMessageBubble(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Texto da mensagem
-                Text(
-                    text = message.text.replace("**", ""),
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
-                    fontWeight = if (message.isUser) FontWeight.Bold else FontWeight.Medium,
-                    color = if (message.isUser) Color(0xFF090D16) else Color.White
-                )
-
-                // Portão de Confirmação para Tema Livre (Fora do Escopo de Sobrevivência)
-                if (!message.isUser && message.requiresFreeTopicConfirmation && !message.pendingFreeTopicQuery.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(10.dp))
+                // Fase "Pensando..." (estilo Google AI Edge Gallery)
+                if (!message.isUser && message.thinkingStatus != null) {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(vertical = 4.dp)
                     ) {
-                        Button(
-                            onClick = { onConfirmFreeTopic(message.pendingFreeTopicQuery) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF10B981),
-                                contentColor = Color(0xFF090D16)
-                            ),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(
-                                text = "✅ Sim, responder",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                        }
-
-                        OutlinedButton(
-                            onClick = onRejectFreeTopic,
-                            border = BorderStroke(1.dp, Color(0xFF64748B)),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(
-                                text = "❌ Não, manter foco",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFE2E8F0)
-                            )
-                        }
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(15.dp),
+                            strokeWidth = 2.dp,
+                            color = Color(0xFF38BDF8)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = message.thinkingStatus,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF38BDF8)
+                        )
                     }
                 }
 
-                // Botão de 1 toque para expandir detalhes sob demanda
-                if (!message.isUser && message.canExpandDetails && !message.topicQueryForExpansion.isNullOrBlank()) {
+                // Texto da mensagem sendo escrito aos poucos (streaming token a token)
+                if (message.text.isNotBlank() || message.isUser) {
+                    val displayedText = buildString {
+                        append(message.text.replace("**", ""))
+                        if (!message.isUser && message.isStreaming) {
+                            append(" ▍")
+                        }
+                    }
+                    Text(
+                        text = displayedText,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = if (message.isUser) FontWeight.Bold else FontWeight.Medium,
+                        color = if (message.isUser) Color(0xFF090D16) else Color.White
+                    )
+                }
+
+                // Botão de 1 toque para expandir detalhes sob demanda (exibido após concluir o streaming)
+                if (!message.isUser && !message.isStreaming && message.canExpandDetails && !message.topicQueryForExpansion.isNullOrBlank()) {
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = { onRequestMoreDetails(message.topicQueryForExpansion, message.isFreeTopic) },
