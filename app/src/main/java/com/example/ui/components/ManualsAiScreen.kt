@@ -103,170 +103,166 @@ fun ManualsAiScreen(
             border = BorderStroke(1.dp, Color(0xFF1E293B)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-            ) {
-                // Linha 1: Título à esquerda + apenas ícones compactos de Limpar / Ver Base RAG à direita
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(
-                        Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        tint = Color(0xFF34D399),
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (showChatView) "IA ResilienceHub (RAG + Tema Livre)" else "Base RAG (${state.manualChunks.size} diretrizes)",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = if (state.isModelLoaded) {
-                                "✓ Modelo Ativo: ${state.loadedModelName ?: "gemma-4-E2B-it.task"} + RAG"
-                            } else {
-                                "RAG Oficial ativo • Carregue o arquivo .task abaixo"
-                            },
-                            fontSize = 10.sp,
-                            color = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFFBBF24),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    if (showChatView && state.chatMessages.size > 1) {
-                        IconButton(
-                            onClick = { viewModel.clearChatHistory() },
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Refresh,
-                                contentDescription = "Limpar Conversa",
-                                tint = Color(0xFFCBD5E1),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-
-                    IconButton(
-                        onClick = { showChatView = !showChatView },
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .size(34.dp)
-                            .testTag("tab_knowledge_base_view")
+                            .weight(1f)
+                            .padding(end = 6.dp)
                     ) {
                         Icon(
-                            if (showChatView) Icons.Default.MenuBook else Icons.Default.Chat,
-                            contentDescription = "Ver Base RAG / Voltar ao Chat",
-                            tint = Color(0xFFFBBF24),
+                            Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = Color(0xFF34D399),
                             modifier = Modifier.size(18.dp)
                         )
-                    }
-                }
-
-                // Linha 2: Botão de Carregar IA SEMPRE visível em 100% da largura no modo retrato
-                if (state.isModelLoaded) {
-                    Surface(
-                        color = Color(0xFF06281E),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, Color(0xFF10B981)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.CheckCircle,
-                                contentDescription = null,
-                                tint = Color(0xFF34D399),
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Column {
                             Text(
-                                text = "IA Ativa: ${state.loadedModelName ?: "Modelo .task"}",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFA7F3D0),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            OutlinedButton(
-                                onClick = { showEdgeModelDialog = true },
-                                border = BorderStroke(1.dp, Color(0xFF34D399)),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                modifier = Modifier
-                                    .height(28.dp)
-                                    .testTag("btn_import_model")
-                            ) {
-                                Text("Trocar .task", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFF34D399))
-                            }
-                        }
-                    }
-                } else {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Button(
-                            onClick = { modelPickerLauncher.launch("*/*") },
-                            enabled = !state.isModelInitializing,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFA855F7),
-                                contentColor = Color.White,
-                                disabledContainerColor = Color(0xFF4C1D95),
-                                disabledContentColor = Color(0xFFDDD6FE)
-                            ),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(36.dp)
-                                .testTag("btn_import_model")
-                        ) {
-                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (state.isModelInitializing) "Carregando IA..." else "Carregar Modelo .task",
-                                fontSize = 11.sp,
+                                text = if (showChatView) "IA ResilienceHub (RAG + Tema Livre)" else "Base RAG (${state.manualChunks.size} diretrizes)",
+                                fontSize = 13.sp,
                                 fontWeight = FontWeight.ExtraBold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = if (state.isModelLoaded) {
+                                    "✓ Modelo Ativo: ${state.loadedModelName ?: "gemma-4-E2B-it.task"} + RAG"
+                                } else {
+                                    "Selecione o arquivo .task para inferência neural livre + RAG"
+                                },
+                                fontSize = 10.sp,
+                                color = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFFBBF24),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                    }
 
-                        if (state.hasSavedModelOnDisk) {
-                            Button(
-                                onClick = { viewModel.loadSavedModelFromDisk() },
-                                enabled = !state.isModelInitializing,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF10B981),
-                                    contentColor = Color(0xFF052E16)
-                                ),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier.height(36.dp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (showChatView && state.chatMessages.size > 1) {
+                            IconButton(
+                                onClick = { viewModel.clearChatHistory() },
+                                modifier = Modifier.size(30.dp)
                             ) {
-                                Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = "Limpar Conversa",
+                                    tint = Color(0xFFCBD5E1),
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = { showChatView = !showChatView },
+                            modifier = Modifier
+                                .size(30.dp)
+                                .testTag("tab_knowledge_base_view")
+                        ) {
+                            Icon(
+                                if (showChatView) Icons.Default.MenuBook else Icons.Default.Chat,
+                                contentDescription = "Ver Base RAG / Voltar ao Chat",
+                                tint = Color(0xFFFBBF24),
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = { showEdgeModelDialog = true },
+                            border = BorderStroke(
+                                1.dp,
+                                if (state.isModelLoaded) Color(0xFF10B981) else Color(0xFFA855F7)
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .height(30.dp)
+                                .testTag("btn_import_model")
+                        ) {
+                            Icon(
+                                if (state.isModelLoaded) Icons.Default.CheckCircle else Icons.Default.FolderOpen,
+                                contentDescription = null,
+                                tint = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFC084FC),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (state.isModelLoaded) "Modelo ✓" else "Modelo .task",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFC084FC)
+                            )
+                        }
+                    }
+                }
+
+                // Barra de ação direta para selecionar/carregar o arquivo .task quando ainda não carregado na memória
+                if (!state.isModelLoaded && !state.isModelInitializing) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        color = Color(0xFF1A1033),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, Color(0xFFA855F7)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "📂 Carregue seu arquivo gemma-4-E2B-it.task:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE9D5FF),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            if (state.hasSavedModelOnDisk) {
+                                Button(
+                                    onClick = { viewModel.loadSavedModelFromDisk() },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF10B981),
+                                        contentColor = Color(0xFF052E16)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("⚡ Ativar Salvo", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+                                }
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Ativar Salvo", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
+                            }
+                            Button(
+                                onClick = { modelPickerLauncher.launch("*/*") },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFA855F7),
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(13.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Selecionar .task", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
                             }
                         }
                     }
                 }
 
                 state.pdfImportStatus?.let { status ->
+                    Spacer(modifier = Modifier.height(6.dp))
                     Surface(
                         color = Color(0xFF0C2434),
                         shape = RoundedCornerShape(8.dp),
