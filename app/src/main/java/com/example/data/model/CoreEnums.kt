@@ -15,6 +15,9 @@ enum class StorageLocation(val displayName: String) {
 
 enum class PoiType(val displayName: String) {
     FAMILY_MEETING("Ponto de Encontro Familiar"),
+    STRATEGIC_PIN("Pin Estratégico / Rota"),
+    HOME_BASE("Casa / Base Segura"),
+    SUPPLY_FUEL("Posto / Água / Suprimentos"),
     HOSPITAL("Hospital / Pronto-Socorro"),
     FIRE_DEPT("Corpo de Bombeiros"),
     SHELTER("Abrigo / Defesa Civil")

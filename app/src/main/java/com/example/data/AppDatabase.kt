@@ -494,6 +494,15 @@ abstract class AppDatabase : RoomDatabase() {
                     longitude = -43.2302,
                     address = "Av. Presidente Castelo Branco - Maracanã, Rio de Janeiro - RJ",
                     phone = "199"
+                ),
+                MapPoiEntity(
+                    id = 8,
+                    title = "Pin Estratégico Del Castilho - Nova América / Linha Amarela",
+                    type = PoiType.STRATEGIC_PIN,
+                    latitude = -22.8792,
+                    longitude = -43.2718,
+                    address = "Av. Pastor Martin Luther King Jr., 126 - Del Castilho, Rio de Janeiro - RJ",
+                    phone = null
                 )
             )
             database.mapPoiDao().insertAll(initialPois)

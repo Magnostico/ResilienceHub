@@ -57,6 +57,9 @@ class BackupManager(
         const val MAX_ROLLING_BACKUPS = 3
         private const val DATA_JSON_ENTRY = "resilience_data.json"
         private const val PDF_DIR_PREFIX = "family_docs/"
+        private const val MAP_TILES_DIR_NAME = "osm_tiles_v4"
+        private const val MAP_TILES_ZIP_PREFIX = "osm_tiles_v4/"
+        private const val STREET_CACHE_FILE_NAME = "street_names_cache.json"
     }
 
     data class BackupSnapshotInfo(
@@ -69,6 +72,7 @@ class BackupManager(
         val profilesCount: Int,
         val poisCount: Int,
         val pdfsCount: Int,
+        val mapTilesCount: Int = 0,
         val isExternalPublic: Boolean
     )
 
@@ -94,10 +98,20 @@ class BackupManager(
         if (!exists()) mkdirs()
     }
     private val familyDocsMetaFile: File = File(familyDocsDir, "family_docs_meta.json")
+    private val mapTilesRootDir: File = File(context.filesDir, MAP_TILES_DIR_NAME)
+    private val streetNamesCacheFile: File = File(context.filesDir, STREET_CACHE_FILE_NAME)
+
+    private fun collectCachedMapTileFiles(): List<File> {
+        if (!mapTilesRootDir.exists()) return emptyList()
+        return mapTilesRootDir.walkTopDown()
+            .filter { it.isFile && it.extension.equals("png", ignoreCase = true) && it.length() >= 60L }
+            .toList()
+    }
 
     /**
-     * Executa o backup completo compacto (.zip) e aplica a rotação máxima de 3 arquivos
-     * para não entupir o armazenamento do celular.
+     * Executa o backup completo compacto (.zip) incluindo Estoque, Família, PDFs,
+     * Pins Estratégicos e todos os Blocos de Mapa Offline (`osm_tiles_v4` + nomes de ruas),
+     * aplicando a rotação máxima de 3 arquivos para não entupir o armazenamento do celular.
      */
     suspend fun performRollingBackup(isAutoBackup: Boolean = false): BackupResult = withContext(Dispatchers.IO) {
         try {
@@ -107,9 +121,10 @@ class BackupManager(
             val allChunks = database.manualChunkDao().getAllChunks().first()
             val customChunks = allChunks.filter { it.rowId > 100 }
             val familyDocs = loadFamilyDocumentsMeta()
+            val mapTileFiles = collectCachedMapTileFiles()
 
             // Se for auto-backup e o banco estiver totalmente zerado, evita sobrescrever um backup bom com dados vazios
-            if (isAutoBackup && items.isEmpty() && profiles.isEmpty() && pois.isEmpty() && familyDocs.isEmpty()) {
+            if (isAutoBackup && items.isEmpty() && profiles.isEmpty() && pois.isEmpty() && familyDocs.isEmpty() && mapTileFiles.isEmpty()) {
                 return@withContext BackupResult(
                     isSuccess = false,
                     message = "Auto-backup ignorado (nenhum dado cadastrado para salvar)."
@@ -130,7 +145,8 @@ class BackupManager(
                     profiles = profiles,
                     pois = pois,
                     customChunks = customChunks,
-                    familyDocs = familyDocs
+                    familyDocs = familyDocs,
+                    mapTileFiles = mapTileFiles
                 )
             }
 
@@ -153,6 +169,7 @@ class BackupManager(
                 profilesCount = profiles.size,
                 poisCount = pois.size,
                 pdfsCount = familyDocs.size,
+                mapTilesCount = mapTileFiles.size,
                 isExternalPublic = savedPublicPath != null
             )
 
@@ -164,7 +181,7 @@ class BackupManager(
 
             BackupResult(
                 isSuccess = true,
-                message = "✓ Backup seguro salvo em $folderMsg ($sizeKb KB • Máx $MAX_ROLLING_BACKUPS arquivos rotativos).",
+                message = "✓ Backup salvo em $folderMsg (${pois.size} pins, ${mapTileFiles.size} blocos de mapa, $sizeKb KB).",
                 snapshot = info
             )
         } catch (e: Exception) {
@@ -186,6 +203,7 @@ class BackupManager(
             val pois = database.mapPoiDao().getAllPois().first()
             val customChunks = database.manualChunkDao().getAllChunks().first().filter { it.rowId > 100 }
             val familyDocs = loadFamilyDocumentsMeta()
+            val mapTileFiles = collectCachedMapTileFiles()
             val now = System.currentTimeMillis()
 
             val out = context.contentResolver.openOutputStream(targetUri)
@@ -199,13 +217,14 @@ class BackupManager(
                     profiles = profiles,
                     pois = pois,
                     customChunks = customChunks,
-                    familyDocs = familyDocs
+                    familyDocs = familyDocs,
+                    mapTileFiles = mapTileFiles
                 )
             }
 
             BackupResult(
                 isSuccess = true,
-                message = "✓ Backup exportado com sucesso (${items.size} itens, ${profiles.size} familiares, ${familyDocs.size} PDFs)!"
+                message = "✓ Backup exportado (${items.size} itens, ${pois.size} pins, ${mapTileFiles.size} blocos de mapa, ${familyDocs.size} PDFs)!"
             )
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao exportar backup para URI", e)
@@ -395,15 +414,17 @@ class BackupManager(
         profiles: List<FamilyProfileEntity>,
         pois: List<MapPoiEntity>,
         customChunks: List<ManualChunkFtsEntity>,
-        familyDocs: List<FamilyDocument>
+        familyDocs: List<FamilyDocument>,
+        mapTileFiles: List<File>
     ) {
         val rootJson = JSONObject().apply {
-            put("backupVersion", 1)
+            put("backupVersion", 2)
             put("timestampMillis", timestamp)
             put("itemsCount", items.size)
             put("profilesCount", profiles.size)
             put("poisCount", pois.size)
             put("pdfsCount", familyDocs.size)
+            put("mapTilesCount", mapTileFiles.size)
 
             // 1. Inventory Items
             val itemsArr = JSONArray()
@@ -442,7 +463,7 @@ class BackupManager(
             }
             put("profiles", profilesArr)
 
-            // 3. Map POIs
+            // 3. Map POIs (Pins Estratégicos, Casa/Base, Suprimentos, Abrigos, Hospitais)
             val poisArr = JSONArray()
             pois.forEach { poi ->
                 poisArr.put(
@@ -495,14 +516,14 @@ class BackupManager(
         }
 
         ZipOutputStream(outputStream).use { zos ->
-            // Grava o JSON principal
+            // 1. Grava o JSON principal
             val jsonEntry = ZipEntry(DATA_JSON_ENTRY)
             zos.putNextEntry(jsonEntry)
             val jsonBytes = rootJson.toString(2).toByteArray(Charsets.UTF_8)
             zos.write(jsonBytes)
             zos.closeEntry()
 
-            // Grava cada PDF de Receita / Documento da Família dentro do ZIP
+            // 2. Grava cada PDF de Receita / Documento da Família dentro do ZIP
             familyDocs.forEach { doc ->
                 val pdfFile = File(doc.filePath)
                 if (pdfFile.exists() && pdfFile.isFile) {
@@ -514,6 +535,38 @@ class BackupManager(
                     zos.closeEntry()
                 }
             }
+
+            // 3. Grava o Cache de Nomes de Ruas Offline (`street_names_cache.json`)
+            if (streetNamesCacheFile.exists() && streetNamesCacheFile.isFile) {
+                runCatching {
+                    val streetEntry = ZipEntry(STREET_CACHE_FILE_NAME)
+                    zos.putNextEntry(streetEntry)
+                    FileInputStream(streetNamesCacheFile).use { fis ->
+                        fis.copyTo(zos)
+                    }
+                    zos.closeEntry()
+                }
+            }
+
+            // 4. Grava todos os Blocos de Mapa Offline salvos (`osm_tiles_v4/{z}/{x}/{y}.png`)
+            val baseFilesDirPath = context.filesDir.absolutePath
+            mapTileFiles.forEach { tileFile ->
+                runCatching {
+                    val relPath = tileFile.absolutePath
+                        .removePrefix(baseFilesDirPath)
+                        .trimStart('/', '\\')
+                        .replace('\\', '/')
+                    if (relPath.startsWith(MAP_TILES_ZIP_PREFIX)) {
+                        val tileEntry = ZipEntry(relPath)
+                        zos.putNextEntry(tileEntry)
+                        FileInputStream(tileFile).use { fis ->
+                            fis.copyTo(zos)
+                        }
+                        zos.closeEntry()
+                    }
+                }
+            }
+
             zos.finish()
         }
     }
@@ -524,25 +577,55 @@ class BackupManager(
     ): BackupResult {
         var jsonContent: String? = null
         val extractedPdfFiles = mutableMapOf<String, File>()
+        var restoredMapTilesCount = 0
 
         if (!familyDocsDir.exists()) familyDocsDir.mkdirs()
 
         ZipInputStream(inputStream).use { zis ->
             var entry: ZipEntry? = zis.nextEntry
             while (entry != null) {
-                val entryName = entry.name
-                if (!entry.isDirectory) {
-                    if (entryName == DATA_JSON_ENTRY || entryName.endsWith("resilience_data.json")) {
-                        val baos = ByteArrayOutputStream()
-                        zis.copyTo(baos)
-                        jsonContent = baos.toString(Charsets.UTF_8.name())
-                    } else if (entryName.startsWith(PDF_DIR_PREFIX) && entryName.endsWith(".pdf", true)) {
-                        val safeName = entryName.substringAfterLast('/')
-                        val destPdf = File(familyDocsDir, safeName)
-                        FileOutputStream(destPdf).use { fos ->
-                            zis.copyTo(fos)
+                val entryName = entry.name.replace('\\', '/')
+                if (!entry.isDirectory && !entryName.contains("..")) {
+                    when {
+                        entryName == DATA_JSON_ENTRY || entryName.endsWith("resilience_data.json") -> {
+                            val baos = ByteArrayOutputStream()
+                            zis.copyTo(baos)
+                            jsonContent = baos.toString(Charsets.UTF_8.name())
                         }
-                        extractedPdfFiles[safeName] = destPdf
+                        entryName.startsWith(PDF_DIR_PREFIX) && entryName.endsWith(".pdf", true) -> {
+                            val safeName = entryName.substringAfterLast('/')
+                            val destPdf = File(familyDocsDir, safeName)
+                            FileOutputStream(destPdf).use { fos ->
+                                zis.copyTo(fos)
+                            }
+                            extractedPdfFiles[safeName] = destPdf
+                        }
+                        entryName == STREET_CACHE_FILE_NAME -> {
+                            runCatching {
+                                val baos = ByteArrayOutputStream()
+                                zis.copyTo(baos)
+                                val incomingJson = JSONObject(baos.toString(Charsets.UTF_8.name()))
+                                val existingJson = if (streetNamesCacheFile.exists()) {
+                                    runCatching { JSONObject(streetNamesCacheFile.readText()) }.getOrDefault(JSONObject())
+                                } else JSONObject()
+                                val keys = incomingJson.keys()
+                                while (keys.hasNext()) {
+                                    val k = keys.next()
+                                    existingJson.put(k, incomingJson.optString(k))
+                                }
+                                streetNamesCacheFile.writeText(existingJson.toString())
+                            }
+                        }
+                        entryName.startsWith(MAP_TILES_ZIP_PREFIX) && entryName.endsWith(".png", true) -> {
+                            runCatching {
+                                val destTile = File(context.filesDir, entryName)
+                                destTile.parentFile?.mkdirs()
+                                FileOutputStream(destTile).use { fos ->
+                                    zis.copyTo(fos)
+                                }
+                                restoredMapTilesCount++
+                            }
+                        }
                     }
                 }
                 zis.closeEntry()
@@ -601,7 +684,7 @@ class BackupManager(
             )
         }
 
-        // 3. Restaura Pontos do Mapa (POIs)
+        // 3. Restaura Pontos do Mapa (POIs e Pins Estratégicos)
         val poisArr = root.optJSONArray("pois") ?: JSONArray()
         val restoredPois = mutableListOf<MapPoiEntity>()
         for (i in 0 until poisArr.length()) {
@@ -679,7 +762,7 @@ class BackupManager(
 
         return BackupResult(
             isSuccess = true,
-            message = "✓ Dados restaurados de \"$sourceName\": ${restoredItems.size} itens, ${restoredProfiles.size} familiares, ${restoredPois.size} pontos e ${metaArrayToSave.length()} PDFs!"
+            message = "✓ Restaurado de \"$sourceName\": ${restoredItems.size} itens, ${restoredPois.size} pins, $restoredMapTilesCount blocos de mapa offline e ${metaArrayToSave.length()} PDFs!"
         )
     }
 
@@ -689,6 +772,7 @@ class BackupManager(
             var profilesCount = 0
             var poisCount = 0
             var pdfsCount = 0
+            var mapTilesCount = 0
             var timestamp = file.lastModified()
 
             FileInputStream(file).use { fis ->
@@ -704,6 +788,7 @@ class BackupManager(
                             profilesCount = root.optInt("profilesCount", root.optJSONArray("profiles")?.length() ?: 0)
                             poisCount = root.optInt("poisCount", root.optJSONArray("pois")?.length() ?: 0)
                             pdfsCount = root.optInt("pdfsCount", root.optJSONArray("familyDocs")?.length() ?: 0)
+                            mapTilesCount = root.optInt("mapTilesCount", 0)
                             break
                         }
                         zis.closeEntry()
@@ -725,6 +810,7 @@ class BackupManager(
                 profilesCount = profilesCount,
                 poisCount = poisCount,
                 pdfsCount = pdfsCount,
+                mapTilesCount = mapTilesCount,
                 isExternalPublic = isExternalPublic
             )
         } catch (e: Exception) {

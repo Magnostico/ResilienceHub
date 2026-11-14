@@ -271,6 +271,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Agenda um Auto-Backup quando novos blocos de mapa da cidade são salvos no aparelho,
+     * garantindo que o arquivo `.zip` em `Download/ResilienceHub_Backups/` contenha todo o mapa offline.
+     */
+    fun triggerAutoBackupAfterMapDownload() {
+        scheduleAutoBackup()
+    }
+
     fun refreshAvailableBackups() {
         viewModelScope.launch {
             _availableBackups.value = backupManager.listAvailableBackups()

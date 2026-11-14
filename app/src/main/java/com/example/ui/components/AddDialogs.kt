@@ -2196,7 +2196,8 @@ fun BackupRestoreDialog(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "• A cada alteração no Estoque, Família, PDFs ou Mapa, o app salva uma cópia compactada (.zip) na pasta pública Download/ResilienceHub_Backups.\n" +
+                            text = "• A cada alteração no Estoque, Família, PDFs, Pins Estratégicos ou download de Mapa Offline, o app salva uma cópia compactada (.zip) na pasta pública Download/ResilienceHub_Backups.\n" +
+                                "• Inclui 100% dos blocos de mapa baixados, nomes de ruas e seus Pins Estratégicos: ao restaurar, o mapa inteiro abre sem nunca precisar de internet!\n" +
                                 "• Para NÃO entupir seu celular, o sistema mantém no máximo 3 backups recentes e apaga os antigos sozinho.",
                             fontSize = 11.sp,
                             lineHeight = 16.sp,
@@ -2330,7 +2331,7 @@ fun BackupRestoreDialog(
                                         color = Color.White
                                     )
                                     Text(
-                                        text = "${snap.itemsCount} itens • ${snap.profilesCount} familiares • ${snap.pdfsCount} PDFs • ${snap.sizeKb} KB",
+                                        text = "${snap.itemsCount} itens • ${snap.profilesCount} fam. • ${snap.pdfsCount} PDFs • ${snap.poisCount} pins • ${snap.mapTilesCount} blocos mapa (${snap.sizeKb} KB)",
                                         fontSize = 10.sp,
                                         color = Color(0xFF38BDF8)
                                     )
