@@ -33,6 +33,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.text.Normalizer
 import java.util.Locale
 
@@ -244,13 +246,21 @@ class PdfRagManager(
     }
 
     private fun getFileSizeFromUri(uri: Uri): Long? {
+        try {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                val statSize = pfd.statSize
+                if (statSize > 0L) return statSize
+            }
+        } catch (_: Exception) {
+        }
         if (uri.scheme == "content") {
             val cursor = context.contentResolver.query(uri, null, null, null, null)
             cursor?.use {
                 if (it.moveToFirst()) {
                     val index = it.getColumnIndex(OpenableColumns.SIZE)
                     if (index != -1 && !it.isNull(index)) {
-                        return it.getLong(index)
+                        val size = it.getLong(index)
+                        if (size > 0L) return size
                     }
                 }
             }
@@ -444,16 +454,131 @@ class PdfRagManager(
     // 3. INICIALIZAÇÃO DO MODELO LOCAL (.task / .litertlm) ESTILO GOOGLE AI EDGE GALLERY
     // =========================================================================
 
-    private fun isLiteRtLmFormat(file: File): Boolean {
-        if (!file.exists() || file.length() < 16) return false
+    /**
+     * Inspeciona os primeiros 8 bytes do arquivo para identificar o formato binário real:
+     * - `"LITERTLM"`: container LiteRT-LM (ex: Gemma 4 E2B/E4B).
+     * - `"ZIP_TASK"`: arquivo ZIP começando com `PK\x03\x04` (ex: MediaPipe / LiteRT `.task` bundle).
+     * - `"TFLITE"`: modelo FlatBuffer TFLite puro (`TFL3` no offset 4).
+     */
+    private fun detectModelMagicFormat(file: File): String {
+        if (!file.exists() || file.length() < 16L) return "UNKNOWN"
         return try {
             val header = ByteArray(8)
             FileInputStream(file).use { fis ->
                 val read = fis.read(header)
-                read == 8 && String(header, Charsets.US_ASCII) == "LITERTLM"
+                if (read < 8) return "UNKNOWN"
+                val ascii8 = String(header, Charsets.US_ASCII)
+                when {
+                    ascii8 == "LITERTLM" -> "LITERTLM"
+                    header[0] == 0x50.toByte() && header[1] == 0x4B.toByte() &&
+                        header[2] == 0x03.toByte() && header[3] == 0x04.toByte() -> "ZIP_TASK"
+                    String(header, 4, 4, Charsets.US_ASCII) == "TFL3" -> "TFLITE"
+                    else -> "UNKNOWN"
+                }
             }
         } catch (_: Exception) {
-            file.name.endsWith(".litertlm", ignoreCase = true)
+            "UNKNOWN"
+        }
+    }
+
+    /**
+     * O código nativo C++ do LiteRT-LM (`third_party/odml/litert_lm/runtime/util/file_format_util.cc`)
+     * escolhe o leitor de formato estritamente pela EXTENSÃO do caminho do arquivo:
+     * - Se terminar em `.task`, tenta abrir como arquivo ZIP no byte 0 (e falha com `Unable to open zip archive.`
+     *   se o arquivo na verdade tiver o cabeçalho `LITERTLM`!).
+     * - Se terminar em `.litertlm`, lê o cabeçalho `LITERTLM` e o `section_begin_offset` corretamente!
+     *
+     * Por isso, alinhamos a extensão do arquivo no armazenamento do app com os seus magic bytes reais (0 ms, rename in-place).
+     */
+    private fun normalizeModelFileExtension(file: File): File {
+        if (!file.exists() || !file.isFile) return file
+        val magic = detectModelMagicFormat(file)
+        val requiredExt = when (magic) {
+            "LITERTLM" -> ".litertlm"
+            "ZIP_TASK" -> ".task"
+            "TFLITE" -> ".tflite"
+            else -> return file
+        }
+
+        if (file.name.endsWith(requiredExt, ignoreCase = true)) {
+            return file
+        }
+
+        val parent = file.parentFile ?: return file
+        if (!parent.canWrite()) return file
+
+        val baseName = file.name
+            .removeSuffix(".task")
+            .removeSuffix(".TASK")
+            .removeSuffix(".litertlm")
+            .removeSuffix(".LITERTLM")
+            .removeSuffix(".bin")
+            .removeSuffix(".tflite")
+        val normalizedFile = File(parent, "$baseName$requiredExt")
+
+        return try {
+            if (normalizedFile.exists() && normalizedFile.absolutePath != file.absolutePath) {
+                normalizedFile.delete()
+            }
+            if (file.renameTo(normalizedFile)) {
+                prefs.edit().putString(KEY_SELECTED_MODEL_PATH, normalizedFile.absolutePath).apply()
+                Log.i(TAG, "Extensão do modelo alinhada com cabeçalho ($magic): ${file.name} -> ${normalizedFile.name}")
+                normalizedFile
+            } else {
+                file
+            }
+        } catch (_: Exception) {
+            file
+        }
+    }
+
+    /**
+     * Verifica se um arquivo `.task` / `.litertlm` em disco está completo e íntegro (não truncado):
+     * - Rejeita arquivos `.part` / `.tmp`.
+     * - Se `expectedSize` for conhecido, exige tamanho idêntico em bytes.
+     * - Se começar com assinatura ZIP (`PK\x03\x04`), verifica nos últimos 65 KB a presença do
+     *   End-of-Central-Directory (`PK\x05\x06` ou ZIP64 `PK\x06\x06`). Se ausente, a cópia anterior foi interrompida.
+     */
+    private fun isCompleteValidModelFile(file: File, expectedSize: Long? = null): Boolean {
+        if (!file.exists() || !file.isFile || !file.canRead()) return false
+        val nameLower = file.name.lowercase(Locale.ROOT)
+        if (nameLower.endsWith(".part") || nameLower.endsWith(".tmp")) return false
+        val len = file.length()
+        if (len < 1024L * 1024L) return false
+        if (expectedSize != null && expectedSize > 0L && len != expectedSize) return false
+
+        val magic = detectModelMagicFormat(file)
+        if (magic == "ZIP_TASK") {
+            return hasZipEndOfCentralDirectory(file)
+        }
+        return true
+    }
+
+    private fun hasZipEndOfCentralDirectory(file: File): Boolean {
+        return try {
+            val len = file.length()
+            if (len < 22L) return false
+            val tailSize = minOf(len, 65558L).toInt()
+            val tailBytes = ByteArray(tailSize)
+            RandomAccessFile(file, "r").use { raf ->
+                raf.seek(len - tailSize)
+                raf.readFully(tailBytes)
+            }
+            // Procura de trás para frente por PK\x05\x06 (EOCD padrão) ou PK\x06\x06 (ZIP64 EOCD)
+            for (i in (tailSize - 4) downTo 0) {
+                if (tailBytes[i] == 0x50.toByte() && tailBytes[i + 1] == 0x4B.toByte()) {
+                    val b2 = tailBytes[i + 2]
+                    val b3 = tailBytes[i + 3]
+                    if ((b2 == 0x05.toByte() && b3 == 0x06.toByte()) ||
+                        (b2 == 0x06.toByte() && b3 == 0x06.toByte())
+                    ) {
+                        return true
+                    }
+                }
+            }
+            false
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -496,7 +621,7 @@ class PdfRagManager(
     }
 
     /**
-     * Retorna os diretórios onde o modelo `.task` pode estar armazenado no app (incluindo
+     * Retorna os diretórios onde o modelo `.task` / `.litertlm` pode estar armazenado no app (incluindo
      * `getExternalFilesDir(null)/imports` usado pelo Google AI Edge Gallery, `noBackupFilesDir` e `filesDir`).
      */
     private fun getCandidateModelDirectories(): List<File> {
@@ -510,9 +635,83 @@ class PdfRagManager(
         )
     }
 
+    private suspend fun copyUriAtomicallyToImportsDir(
+        modelUri: Uri,
+        safeName: String,
+        expectedSize: Long?,
+        onProgressStatus: (suspend (String) -> Unit)?
+    ): File {
+        val baseDir = context.getExternalFilesDir(null) ?: context.noBackupFilesDir
+        val importsDir = File(baseDir, "imports").apply { if (!exists()) mkdirs() }
+        val rawTargetFile = File(importsDir, safeName)
+        val tempPartFile = File(importsDir, "$safeName.part")
+
+        // Remove arquivos antigos/incompletos para liberar espaço antes de copiar
+        getCandidateModelDirectories().forEach { dir ->
+            dir.listFiles()?.forEach { f ->
+                if (f.isFile && (
+                        f.name.endsWith(".part", true) ||
+                        f.name.endsWith(".tmp", true) ||
+                        f.name.endsWith(".task", true) ||
+                        f.name.endsWith(".litertlm", true) ||
+                        f.name.endsWith(".bin", true)
+                    )
+                ) {
+                    try { f.delete() } catch (_: Exception) {}
+                }
+            }
+        }
+
+        val totalMb = if (expectedSize != null && expectedSize > 0) expectedSize / (1024 * 1024) else 0L
+        onProgressStatus?.invoke(
+            if (totalMb > 0) "📥 Copiando \"$safeName\" ($totalMb MB) para o app (0%)..."
+            else "📥 Copiando \"$safeName\" para o armazenamento do app..."
+        )
+
+        val inputStream = context.contentResolver.openInputStream(modelUri)
+            ?: throw Exception("Não foi possível abrir o arquivo selecionado")
+
+        var totalCopied = 0L
+        inputStream.use { input ->
+            FileOutputStream(tempPartFile).use { output ->
+                val buffer = ByteArray(2 * 1024 * 1024) // Buffer de 2 MB para cópia rápida
+                var bytesRead: Int
+                var lastReportedPct = -1
+                while (input.read(buffer).also { bytesRead = it } != -1) {
+                    output.write(buffer, 0, bytesRead)
+                    totalCopied += bytesRead
+                    if (expectedSize != null && expectedSize > 0) {
+                        val pct = ((totalCopied * 100) / expectedSize).toInt().coerceIn(0, 100)
+                        if (pct >= lastReportedPct + 4) {
+                            lastReportedPct = pct
+                            val copiedMb = totalCopied / (1024 * 1024)
+                            onProgressStatus?.invoke("📥 Copiando \"$safeName\": $pct% ($copiedMb MB / $totalMb MB)...")
+                        }
+                    }
+                }
+                output.flush()
+                try { output.fd.sync() } catch (_: Exception) {}
+            }
+        }
+
+        if (expectedSize != null && expectedSize > 0L && totalCopied != expectedSize) {
+            tempPartFile.delete()
+            throw Exception("Cópia interrompida antes do fim ($totalCopied de $expectedSize bytes). Tente novamente mantendo a tela aberta.")
+        }
+
+        if (rawTargetFile.exists()) {
+            rawTargetFile.delete()
+        }
+        val finalRawFile = if (tempPartFile.renameTo(rawTargetFile)) rawTargetFile else tempPartFile
+        return normalizeModelFileExtension(finalRawFile)
+    }
+
     /**
-     * Importa o arquivo `.task` / `.litertlm` selecionado pelo usuário (reaproveitando cópia já existente
-     * instantaneamente sem duplicar 2.58 GB) e inicializa o `Engine` + `Conversation` na memória.
+     * Importa o arquivo `.task` / `.litertlm` selecionado pelo usuário:
+     * 1. Alinha automaticamente a extensão (`.litertlm` vs `.task`) com os magic bytes reais do arquivo
+     *    para evitar o erro `Unable to open zip archive.` do `file_format_util.cc` no LiteRT-LM!
+     * 2. Verifica a integridade completa do arquivo (tamanho 64-bit via `statSize` + assinatura ZIP EOCD).
+     * 3. Se uma cópia anterior estava truncada/corrompida, apaga e refaz a cópia automaticamente via arquivo `.part`.
      */
     suspend fun importModelFromUri(
         modelUri: Uri,
@@ -525,76 +724,57 @@ class PdfRagManager(
                 rawName.endsWith(".bin", true) ||
                 rawName.endsWith(".tflite", true)
             val safeName = if (isValidExt) rawName else "$rawName.task"
+            val baseStem = safeName
+                .removeSuffix(".task")
+                .removeSuffix(".TASK")
+                .removeSuffix(".litertlm")
+                .removeSuffix(".LITERTLM")
             val expectedSize = getFileSizeFromUri(modelUri)
 
-            // 1. Verifica se o arquivo já existe em qualquer pasta do app (evita copiar 2.58 GB de novo!)
+            // 1. Procura cópia existente válida (mesmo nome-base com extensão .task ou .litertlm e tamanho exato)
             val existingCopy = getCandidateModelDirectories()
-                .map { File(it, safeName) }
+                .flatMap { dir ->
+                    listOf(
+                        File(dir, safeName),
+                        File(dir, "$baseStem.litertlm"),
+                        File(dir, "$baseStem.task")
+                    )
+                }
                 .firstOrNull { f ->
                     f.exists() && f.isFile && f.length() > 50L * 1024 * 1024 &&
-                        (expectedSize == null || expectedSize <= 0L || f.length() == expectedSize)
+                        isCompleteValidModelFile(f, expectedSize)
                 }
 
-            val targetFile: File
-            if (existingCopy != null) {
-                targetFile = existingCopy
-                val sizeMb = targetFile.length() / (1024 * 1024)
-                onProgressStatus?.invoke("⚡ Arquivo \"$safeName\" ($sizeMb MB) já encontrado no armazenamento do app! Inicializando motor...")
+            var reusedExistingCopy = false
+            var targetFile: File = if (existingCopy != null) {
+                reusedExistingCopy = true
+                val normalized = normalizeModelFileExtension(existingCopy)
+                val sizeMb = normalized.length() / (1024 * 1024)
+                onProgressStatus?.invoke("⚡ Arquivo \"${normalized.name}\" ($sizeMb MB) validado no app! Inicializando motor...")
+                normalized
             } else {
-                // Usa getExternalFilesDir(null)/imports igual ao Google AI Edge Gallery (sem limite de quota interna e fora do Auto-Backup)
-                val baseDir = context.getExternalFilesDir(null) ?: context.noBackupFilesDir
-                val importsDir = File(baseDir, "imports").apply { if (!exists()) mkdirs() }
-                targetFile = File(importsDir, safeName)
-
-                // Limpa versões antigas/incompletas para garantir espaço livre
-                getCandidateModelDirectories().forEach { dir ->
-                    dir.listFiles()?.forEach { f ->
-                        if (f.isFile && f.absolutePath != targetFile.absolutePath &&
-                            (f.name.endsWith(".task", true) || f.name.endsWith(".litertlm", true) || f.name.endsWith(".bin", true))
-                        ) {
-                            try { f.delete() } catch (_: Exception) {}
-                        }
-                    }
-                }
-
-                val totalMb = if (expectedSize != null && expectedSize > 0) expectedSize / (1024 * 1024) else 0L
-                onProgressStatus?.invoke(
-                    if (totalMb > 0) "📥 Copiando \"$safeName\" ($totalMb MB) para o app (0%)..."
-                    else "📥 Copiando \"$safeName\" para o armazenamento do app..."
-                )
-
-                val inputStream = context.contentResolver.openInputStream(modelUri)
-                    ?: return@withContext Result.failure(Exception("Não foi possível abrir o arquivo selecionado"))
-
-                inputStream.use { input ->
-                    targetFile.outputStream().use { output ->
-                        val buffer = ByteArray(1024 * 1024) // 1 MB buffer para cópia rápida
-                        var bytesRead: Int
-                        var totalCopied = 0L
-                        var lastReportedPct = -1
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            output.write(buffer, 0, bytesRead)
-                            totalCopied += bytesRead
-                            if (expectedSize != null && expectedSize > 0) {
-                                val pct = ((totalCopied * 100) / expectedSize).toInt().coerceIn(0, 100)
-                                if (pct >= lastReportedPct + 5) {
-                                    lastReportedPct = pct
-                                    val copiedMb = totalCopied / (1024 * 1024)
-                                    onProgressStatus?.invoke("📥 Copiando \"$safeName\": $pct% ($copiedMb MB / $totalMb MB)...")
-                                }
-                            }
-                        }
-                        output.flush()
-                    }
-                }
+                copyUriAtomicallyToTargetAndNormalize(modelUri, safeName, expectedSize, onProgressStatus)
             }
 
             prefs.edit().putString(KEY_SELECTED_MODEL_PATH, targetFile.absolutePath).apply()
 
             // 2. Inicializa imediatamente o Engine e a Conversation na memória (GPU/CPU)
-            val initResult = ensureModelLoadedInMemory(targetFile, forceReload = true, onStatus = onProgressStatus)
+            var initResult = ensureModelLoadedInMemory(targetFile, forceReload = true, onStatus = onProgressStatus)
+
+            // 3. Auto-Recuperação (Self-Healing): se reaproveitou um arquivo existente que estava corrompido/truncado
+            // de uma sessão anterior, apaga o arquivo corrompido, copia do zero a partir do URI e inicializa novamente!
+            if (initResult.isFailure && reusedExistingCopy) {
+                Log.w(TAG, "Arquivo existente falhou ao abrir (${initResult.exceptionOrNull()?.message}). Recopiando do zero...")
+                onProgressStatus?.invoke("🔄 Cópia anterior incompleta detectada. Copiando arquivo íntegro novamente...")
+                try { targetFile.delete() } catch (_: Exception) {}
+                targetFile = copyUriAtomicallyToTargetAndNormalize(modelUri, safeName, expectedSize, onProgressStatus)
+                prefs.edit().putString(KEY_SELECTED_MODEL_PATH, targetFile.absolutePath).apply()
+                initResult = ensureModelLoadedInMemory(targetFile, forceReload = true, onStatus = onProgressStatus)
+            }
+
             if (initResult.isSuccess) {
-                Result.success("${targetFile.name} ($loadedBackendLabel)")
+                val activeName = getLoadedModelName() ?: targetFile.name
+                Result.success("$activeName ($loadedBackendLabel)")
             } else {
                 Result.failure(initResult.exceptionOrNull() ?: Exception("Falha ao inicializar os pesos do modelo"))
             }
@@ -605,19 +785,28 @@ class PdfRagManager(
         }
     }
 
+    private suspend fun copyUriAtomicallyToTargetAndNormalize(
+        modelUri: Uri,
+        safeName: String,
+        expectedSize: Long?,
+        onProgressStatus: (suspend (String) -> Unit)?
+    ): File = copyUriAtomicallyToImportsDir(modelUri, safeName, expectedSize, onProgressStatus)
+
     /**
-     * Inicializa na RAM/GPU um arquivo `.task` já salvo no dispositivo.
+     * Inicializa na RAM/GPU um arquivo `.task` / `.litertlm` já salvo no dispositivo.
      */
     suspend fun loadExistingModelIntoMemory(
         customPath: String? = null,
         forceReload: Boolean = false,
         onProgressStatus: (suspend (String) -> Unit)? = null
     ): Result<String> = withContext(Dispatchers.IO) {
-        val modelFile = findLocalModelFile(customPath)
-            ?: return@withContext Result.failure(Exception("Nenhum arquivo .task encontrado. Toque em 'Selecionar .task' e escolha o gemma-4-E2B-it.task."))
+        val rawFile = findLocalModelFile(customPath)
+            ?: return@withContext Result.failure(Exception("Nenhum arquivo .task encontrado. Toque em 'Selecionar Arquivo .task' e escolha o gemma-4-E2B-it.task."))
+        val modelFile = normalizeModelFileExtension(rawFile)
         val res = ensureModelLoadedInMemory(modelFile, forceReload = forceReload, onStatus = onProgressStatus)
         if (res.isSuccess) {
-            Result.success("${modelFile.name} ($loadedBackendLabel)")
+            val activeName = getLoadedModelName() ?: modelFile.name
+            Result.success("$activeName ($loadedBackendLabel)")
         } else {
             Result.failure(res.exceptionOrNull() ?: Exception("Falha ao carregar modelo"))
         }
@@ -625,7 +814,9 @@ class PdfRagManager(
 
     /**
      * Inicializa o `Engine` e cria a `Conversation` persistente exatamente como em `LlmChatModelHelper.kt`
-     * do Google AI Edge Gallery (`DEFAULT_MAX_TOKEN = 1024`, `cacheDir = null`, `topK = 64`, `topP = 0.95`, `temperature = 1.0`).
+     * do Google AI Edge Gallery (`DEFAULT_MAX_TOKEN = 1024`, `topK = 64`, `topP = 0.95`, `temperature = 1.0`).
+     * - Alinha a extensão do arquivo com seus magic bytes (`LITERTLM` -> `.litertlm`, `PK\x03\x04` -> `.task`).
+     * - Tenta `LiteRT-LM Engine` (GPU e CPU) e, caso o arquivo seja um bundle MediaPipe legado, também tenta `MediaPipe LlmInference`.
      */
     private suspend fun ensureModelLoadedInMemory(
         modelFile: File,
@@ -634,8 +825,10 @@ class PdfRagManager(
     ): Result<Unit> = engineMutex.withLock {
         withContext(Dispatchers.IO) {
             try {
+                val normalizedFile = normalizeModelFileExtension(modelFile)
+
                 if (!forceReload &&
-                    loadedModelPath == modelFile.absolutePath &&
+                    loadedModelPath == normalizedFile.absolutePath &&
                     (cachedLiteRtEngine != null || cachedMediaPipeLlm != null)
                 ) {
                     if (cachedLiteRtEngine != null && (cachedLiteRtConversation == null || !cachedLiteRtConversation!!.isAlive)) {
@@ -646,36 +839,47 @@ class PdfRagManager(
 
                 closeCachedEnginesLocked()
 
-                val sizeMb = modelFile.length() / (1024 * 1024)
-                val isLiteRt = isLiteRtLmFormat(modelFile)
+                if (!isCompleteValidModelFile(normalizedFile)) {
+                    val badLenMb = normalizedFile.length() / (1024 * 1024)
+                    try { normalizedFile.delete() } catch (_: Exception) {}
+                    val msg = "O arquivo do modelo ($badLenMb MB) estava incompleto/truncado e foi limpo. Selecione o arquivo .task novamente para concluir a cópia."
+                    lastModelError = msg
+                    return@withContext Result.failure(Exception(msg))
+                }
 
-                if (isLiteRt) {
-                    val pref = getPreferredBackend()
-                    val backendsToTry = if (pref.equals("CPU", ignoreCase = true)) {
-                        listOf("CPU" to Backend.CPU(), "GPU" to Backend.GPU())
-                    } else {
-                        listOf("GPU" to Backend.GPU(), "CPU" to Backend.CPU())
-                    }
+                val sizeMb = normalizedFile.length() / (1024 * 1024)
+                val magicFormat = detectModelMagicFormat(normalizedFile)
 
-                    // Em LlmChatModelHelper.kt do Google AI Edge Gallery, cacheDir é null quando o modelo
-                    // está no armazenamento do app, ou externalFilesDir quando está em /data/local/tmp
-                    val effectiveCacheDir = if (modelFile.absolutePath.startsWith("/data/local/tmp")) {
-                        context.getExternalFilesDir(null)?.absolutePath
-                    } else {
-                        null
-                    }
+                val pref = getPreferredBackend()
+                val backendsToTry = if (pref.equals("CPU", ignoreCase = true)) {
+                    listOf("CPU" to Backend.CPU(), "GPU" to Backend.GPU())
+                } else {
+                    listOf("GPU" to Backend.GPU(), "CPU" to Backend.CPU())
+                }
 
-                    var lastErr: Throwable? = null
-                    for ((label, backend) in backendsToTry) {
+                val fallbackCacheDir = (context.getExternalFilesDir(null) ?: context.noBackupFilesDir).absolutePath
+                val cacheDirsToTry = if (normalizedFile.absolutePath.startsWith("/data/local/tmp") ||
+                    normalizedFile.parentFile?.canWrite() != true
+                ) {
+                    listOf<String?>(fallbackCacheDir)
+                } else {
+                    listOf<String?>(null, fallbackCacheDir)
+                }
+
+                var lastErr: Throwable? = null
+
+                // 1. Tenta sempre o motor oficial LiteRT-LM (Google AI Edge Gallery) em GPU/CPU
+                for ((label, backend) in backendsToTry) {
+                    for (candidateCacheDir in cacheDirsToTry) {
                         try {
-                            onStatus?.invoke("⚙️ Inicializando ${modelFile.name} ($sizeMb MB) via LiteRT-LM ($label)... aguarde")
+                            onStatus?.invoke("⚙️ Inicializando ${normalizedFile.name} ($sizeMb MB) via LiteRT-LM ($label)... aguarde")
                             val engineConfig = EngineConfig(
-                                modelPath = modelFile.absolutePath,
+                                modelPath = normalizedFile.absolutePath,
                                 backend = backend,
                                 visionBackend = null,
                                 audioBackend = null,
                                 maxNumTokens = DEFAULT_MAX_TOKEN,
-                                cacheDir = effectiveCacheDir
+                                cacheDir = candidateCacheDir
                             )
                             val engine = Engine(engineConfig)
                             engine.initialize()
@@ -683,35 +887,48 @@ class PdfRagManager(
 
                             cachedLiteRtEngine = engine
                             cachedLiteRtConversation = conversation
-                            loadedModelPath = modelFile.absolutePath
+                            loadedModelPath = normalizedFile.absolutePath
                             loadedBackendLabel = label
                             lastModelError = null
-                            prefs.edit().putString(KEY_SELECTED_MODEL_PATH, modelFile.absolutePath).apply()
-                            Log.i(TAG, "LiteRT-LM Engine + Conversation inicializados com sucesso em $label: ${modelFile.absolutePath}")
+                            prefs.edit().putString(KEY_SELECTED_MODEL_PATH, normalizedFile.absolutePath).apply()
+                            Log.i(TAG, "LiteRT-LM Engine + Conversation inicializados com sucesso em $label: ${normalizedFile.absolutePath}")
                             return@withContext Result.success(Unit)
                         } catch (t: Throwable) {
-                            Log.w(TAG, "Falha ao inicializar LiteRT-LM com $label, tentando alternativa...", t)
+                            Log.w(TAG, "Tentativa LiteRT-LM ($label, cacheDir=$candidateCacheDir) falhou: ${t.message}")
                             lastErr = t
                         }
                     }
-                    val rawMsg = lastErr?.localizedMessage ?: lastErr?.javaClass?.simpleName ?: "Erro desconhecido no LiteRT-LM"
-                    val cleanMsg = cleanUpTaskErrorMessage(rawMsg)
-                    lastModelError = cleanMsg
-                    return@withContext Result.failure(Exception(cleanMsg, lastErr))
-                } else {
-                    onStatus?.invoke("⚙️ Carregando ${modelFile.name} ($sizeMb MB) no MediaPipe GenAI...")
-                    val options = LlmInference.LlmInferenceOptions.builder()
-                        .setModelPath(modelFile.absolutePath)
-                        .setMaxTokens(DEFAULT_MAX_TOKEN)
-                        .build()
-                    val llm = LlmInference.createFromOptions(context, options)
-                    cachedMediaPipeLlm = llm
-                    loadedModelPath = modelFile.absolutePath
-                    loadedBackendLabel = "MediaPipe GenAI"
-                    lastModelError = null
-                    prefs.edit().putString(KEY_SELECTED_MODEL_PATH, modelFile.absolutePath).apply()
-                    return@withContext Result.success(Unit)
                 }
+
+                // 2. Se o arquivo não for exclusivo LITERTLM (ex: bundle MediaPipe .task / .tflite), tenta MediaPipe GenAI como fallback
+                if (magicFormat != "LITERTLM") {
+                    try {
+                        onStatus?.invoke("⚙️ Carregando ${normalizedFile.name} ($sizeMb MB) no MediaPipe GenAI...")
+                        val options = LlmInference.LlmInferenceOptions.builder()
+                            .setModelPath(normalizedFile.absolutePath)
+                            .setMaxTokens(DEFAULT_MAX_TOKEN)
+                            .build()
+                        val llm = LlmInference.createFromOptions(context, options)
+                        cachedMediaPipeLlm = llm
+                        loadedModelPath = normalizedFile.absolutePath
+                        loadedBackendLabel = "MediaPipe GenAI"
+                        lastModelError = null
+                        prefs.edit().putString(KEY_SELECTED_MODEL_PATH, normalizedFile.absolutePath).apply()
+                        return@withContext Result.success(Unit)
+                    } catch (mpErr: Throwable) {
+                        Log.w(TAG, "Tentativa MediaPipe GenAI também falhou", mpErr)
+                        if (lastErr == null) lastErr = mpErr
+                    }
+                }
+
+                val rawMsg = lastErr?.localizedMessage ?: lastErr?.javaClass?.simpleName ?: "Erro desconhecido ao abrir modelo"
+                val cleanMsg = cleanUpTaskErrorMessage(rawMsg)
+                // Se o C++ retornou "Unable to open zip archive.", o arquivo em disco está truncado/incompleto: remove-o para não travar futuras tentativas
+                if (cleanMsg.contains("unable to open zip", ignoreCase = true)) {
+                    try { normalizedFile.delete() } catch (_: Exception) {}
+                }
+                lastModelError = cleanMsg
+                return@withContext Result.failure(Exception(cleanMsg, lastErr))
             } catch (t: Throwable) {
                 val msg = cleanUpTaskErrorMessage(t.localizedMessage ?: t.javaClass.simpleName)
                 lastModelError = msg
@@ -811,35 +1028,38 @@ class PdfRagManager(
     fun findLocalModelFile(customPath: String? = null): File? {
         if (!customPath.isNullOrBlank()) {
             val f = File(customPath)
-            if (f.exists() && f.length() > 1024 * 1024) return f
+            if (isCompleteValidModelFile(f)) return normalizeModelFileExtension(f)
         }
         if (!loadedModelPath.isNullOrBlank()) {
             val f = File(loadedModelPath!!)
-            if (f.exists() && f.length() > 1024 * 1024) return f
+            if (isCompleteValidModelFile(f)) return normalizeModelFileExtension(f)
         }
         val savedPath = prefs.getString(KEY_SELECTED_MODEL_PATH, null)
         if (!savedPath.isNullOrBlank()) {
             val f = File(savedPath)
-            if (f.exists() && f.length() > 1024 * 1024) return f
+            if (isCompleteValidModelFile(f)) return normalizeModelFileExtension(f)
         }
 
-        val supportedExts = listOf(".task", ".litertlm", ".bin", ".tflite")
+        val supportedExts = listOf(".litertlm", ".task", ".bin", ".tflite")
         for (dir in getCandidateModelDirectories()) {
             if (!dir.exists() || !dir.canRead()) continue
             val found = dir.listFiles()?.firstOrNull { file ->
                 file.isFile &&
                     supportedExts.any { ext -> file.name.endsWith(ext, ignoreCase = true) } &&
-                    file.length() > 1024 * 1024
+                    isCompleteValidModelFile(file)
             }
-            if (found != null) return found
+            if (found != null) return normalizeModelFileExtension(found)
         }
 
         val explicitCandidates = listOf(
+            File("/sdcard/Download/gemma-4-E2B-it.litertlm"),
+            File("/storage/emulated/0/Download/gemma-4-E2B-it.litertlm"),
             File("/sdcard/Download/gemma-4-E2B-it.task"),
             File("/storage/emulated/0/Download/gemma-4-E2B-it.task"),
+            File("/data/local/tmp/gemma-4-E2B-it.litertlm"),
             File("/data/local/tmp/gemma-4-E2B-it.task")
         )
-        return explicitCandidates.firstOrNull { it.exists() && it.canRead() && it.length() > 1024 * 1024 }
+        return explicitCandidates.firstOrNull { isCompleteValidModelFile(it) }
     }
 
     // =========================================================================

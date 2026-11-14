@@ -69,9 +69,9 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.*
 
-private const val TILE_CACHE_DIR_NAME = "osm_tiles_v3"
+private const val TILE_CACHE_DIR_NAME = "osm_tiles_v4"
 private const val VALID_TILE_USER_AGENT =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ResilienceHub/1.0 (https://github.com/Magnostico/ResilienceHub)"
+    "ResilienceHubApp/2.0 (Android; https://github.com/Magnostico/ResilienceHub)"
 
 private data class NamedRoadVector(
     val name: String,
@@ -82,11 +82,12 @@ private data class NamedRoadVector(
 
 /**
  * Motor Cartográfico Híbrido 100% Kotlin/Compose:
- * 1. Projeção Web Mercator com Escala DPI Nativa (280.dp por tile + FilterQuality.High) para exibir nomes de todas as ruas com nitidez.
- * 2. Purga automática de tiles antigos bloqueados ("403 Access blocked") e validação estrita de cabeçalho HTTP (`x-blocked == null`) + espelho ArcGIS World Street Map.
- * 3. Fallback Multi-Nível (Parent/Child Tile Scaling) para que o Zoom In e Zoom Out nunca fiquem com blocos escuros/vazios.
- * 4. Gestos dedicados (`awaitEachGesture`) que consomem o toque imediatamente no mapa sem deixar o `LazyColumn` roubar o arraste vertical ou a pinça.
+ * 1. Projeção Web Mercator com Escala DPI Nativa (256.dp por tile + FilterQuality.High) para exibir nomes de todas as ruas com nitidez.
+ * 2. Fila de download controlada (máx. 3 conexões simultâneas) em múltiplos servidores OpenStreetMap (OSM Oficial, OSM.de e OSM.fr) até Zoom 19, sem bloqueio por Varnish e sem tiles cinzas.
+ * 3. Redesenho reativo garantido a cada tile carregado (`tileRenderVersion`) + Fallback Multi-Nível (Parent/Child Tile Scaling) + Grade Tática Local em qualquer coordenada GPS.
+ * 4. Suporte fluido a Pulso GPS (1x), Rastreio Vivo em Movimento, Pinça (Zoom In/Out), Duplo-Toque e Arraste.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @Composable
 fun OfflineMapScreen(
     state: MainUiState,
@@ -96,7 +97,8 @@ fun OfflineMapScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val tileDownloadScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    val tileDownloadDispatcher = remember { Dispatchers.IO.limitedParallelism(3) }
+    val tileDownloadScope = remember { CoroutineScope(SupervisorJob() + tileDownloadDispatcher) }
     val inFlightTiles = remember { ConcurrentHashMap.newKeySet<String>() }
 
     DisposableEffect(Unit) {
@@ -112,10 +114,10 @@ fun OfflineMapScreen(
     val focusedPoi = navList.find { it.poiId == selectedPoiId } ?: navList.firstOrNull()
     val focusedPoiEntity = state.pois.find { it.id == focusedPoi?.poiId }
 
-    // Inicia em nível de rua (16.5f) onde todos os nomes de ruas e avenidas aparecem com clareza
+    // Inicia em nível de rua (16.0f) onde todos os nomes de ruas e avenidas aparecem com clareza imediata
     var mapCenterLat by remember { mutableDoubleStateOf(state.currentLat) }
     var mapCenterLon by remember { mutableDoubleStateOf(state.currentLon) }
-    var mapZoomFloat by remember { mutableFloatStateOf(16.5f) }
+    var mapZoomFloat by remember { mutableFloatStateOf(16.0f) }
     val mapZoomInt = mapZoomFloat.toInt().coerceIn(10, 19)
 
     var isMapFullscreen by remember { mutableStateOf(false) }
@@ -124,8 +126,9 @@ fun OfflineMapScreen(
     var showStreetTiles by remember { mutableStateOf(true) }
     var currentStreetAddress by remember { mutableStateOf("Localizando rua/avenida...") }
 
-    // Cache em memória e contador de blocos salvos em disco
+    // Cache em memória, versão de renderização reativa (força redraw imediato do Canvas) e contador de blocos em disco
     val tileBitmapCache = remember { mutableStateMapOf<String, ImageBitmap>() }
+    var tileRenderVersion by remember { mutableIntStateOf(0) }
     var cachedTilesCount by remember {
         mutableIntStateOf(countCachedTilesOnDisk(context))
     }
@@ -133,12 +136,13 @@ fun OfflineMapScreen(
     var preloadStatusText by remember { mutableStateOf<String?>(null) }
     var showConfirmClearPois by remember { mutableStateOf(false) }
 
-    // Limpa na inicialização qualquer tile antigo corrompido ("403 Access blocked") da pasta legada osm_tiles
+    // Limpa na inicialização qualquer tile antigo corrompido ("403 Access blocked" ou cinza do ArcGIS) das pastas legadas
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             purgePoisonedLegacyTiles(context)
         }
         cachedTilesCount = countCachedTilesOnDisk(context)
+        tileRenderVersion++
     }
 
     // Quando o GPS atualiza a posição (Pulso 1x ou Rastreio Vivo) e o modo Auto-Seguir está ativo, move o centro do mapa junto com o usuário
@@ -466,12 +470,16 @@ fun OfflineMapScreen(
                     currentStreetAddress = currentStreetAddress,
                     focusedPoiEntity = focusedPoiEntity,
                     tileBitmapCache = tileBitmapCache,
+                    tileRenderVersion = tileRenderVersion,
                     tileDownloadScope = tileDownloadScope,
                     inFlightTiles = inFlightTiles,
                     cachedTilesCount = cachedTilesCount,
                     isPreloadingTiles = isPreloadingTiles,
                     preloadStatusText = preloadStatusText,
-                    onUpdateCachedCount = { cachedTilesCount = countCachedTilesOnDisk(context) },
+                    onTileLoaded = { newlySavedToDisk ->
+                        tileRenderVersion++
+                        if (newlySavedToDisk) cachedTilesCount++
+                    },
                     onTransformMap = { dLat, dLon, zoomFactor ->
                         if (abs(dLat) > 1e-7 || abs(dLon) > 1e-7) {
                             autoFollowUser = false
@@ -488,7 +496,7 @@ fun OfflineMapScreen(
                         autoFollowUser = true
                         mapCenterLat = state.currentLat
                         mapCenterLon = state.currentLon
-                        if (mapZoomFloat < 16.5f) mapZoomFloat = 16.8f
+                        if (mapZoomFloat < 16.0f) mapZoomFloat = 16.5f
                     },
                     onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
                     onToggleFullscreen = { isMapFullscreen = true },
@@ -501,9 +509,11 @@ fun OfflineMapScreen(
                                 centerLat = mapCenterLat,
                                 centerLon = mapCenterLon,
                                 zoom = mapZoomInt,
-                                cache = tileBitmapCache
+                                cache = tileBitmapCache,
+                                onEachTileLoaded = { tileRenderVersion++ }
                             )
-                            cachedTilesCount = countCachedTilesOnDisk(context)
+                            cachedTilesCount = withContext(Dispatchers.IO) { countCachedTilesOnDisk(context) }
+                            tileRenderVersion++
                             preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos de ruas salvos" else "✓ Ruas da região em cache"
                             isPreloadingTiles = false
                         }
@@ -653,12 +663,16 @@ fun OfflineMapScreen(
                         currentStreetAddress = currentStreetAddress,
                         focusedPoiEntity = focusedPoiEntity,
                         tileBitmapCache = tileBitmapCache,
+                        tileRenderVersion = tileRenderVersion,
                         tileDownloadScope = tileDownloadScope,
                         inFlightTiles = inFlightTiles,
                         cachedTilesCount = cachedTilesCount,
                         isPreloadingTiles = isPreloadingTiles,
                         preloadStatusText = preloadStatusText,
-                        onUpdateCachedCount = { cachedTilesCount = countCachedTilesOnDisk(context) },
+                        onTileLoaded = { newlySavedToDisk ->
+                            tileRenderVersion++
+                            if (newlySavedToDisk) cachedTilesCount++
+                        },
                         onTransformMap = { dLat, dLon, zoomFactor ->
                             if (abs(dLat) > 1e-7 || abs(dLon) > 1e-7) {
                                 autoFollowUser = false
@@ -675,7 +689,7 @@ fun OfflineMapScreen(
                             autoFollowUser = true
                             mapCenterLat = state.currentLat
                             mapCenterLon = state.currentLon
-                            if (mapZoomFloat < 16.5f) mapZoomFloat = 17.0f
+                            if (mapZoomFloat < 16.0f) mapZoomFloat = 16.8f
                         },
                         onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
                         onToggleFullscreen = { isMapFullscreen = false },
@@ -688,9 +702,11 @@ fun OfflineMapScreen(
                                     centerLat = mapCenterLat,
                                     centerLon = mapCenterLon,
                                     zoom = mapZoomInt,
-                                    cache = tileBitmapCache
+                                    cache = tileBitmapCache,
+                                    onEachTileLoaded = { tileRenderVersion++ }
                                 )
-                                cachedTilesCount = countCachedTilesOnDisk(context)
+                                cachedTilesCount = withContext(Dispatchers.IO) { countCachedTilesOnDisk(context) }
+                                tileRenderVersion++
                                 preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos de ruas salvos" else "✓ Região em cache"
                                 isPreloadingTiles = false
                             }
@@ -986,12 +1002,13 @@ private fun MapViewportBox(
     currentStreetAddress: String,
     focusedPoiEntity: MapPoiEntity?,
     tileBitmapCache: MutableMap<String, ImageBitmap>,
+    tileRenderVersion: Int,
     tileDownloadScope: CoroutineScope,
     inFlightTiles: MutableSet<String>,
     cachedTilesCount: Int,
     isPreloadingTiles: Boolean,
     preloadStatusText: String?,
-    onUpdateCachedCount: () -> Unit,
+    onTileLoaded: (newlySavedToDisk: Boolean) -> Unit,
     onTransformMap: (dLat: Double, dLon: Double, zoomFactor: Float) -> Unit,
     onZoomChange: (Float) -> Unit,
     onCenterUser: () -> Unit,
@@ -1021,9 +1038,10 @@ private fun MapViewportBox(
             crisisMode = state.crisisMode,
             showStreetTiles = showStreetTiles,
             tileBitmapCache = tileBitmapCache,
+            tileRenderVersion = tileRenderVersion,
             tileDownloadScope = tileDownloadScope,
             inFlightTiles = inFlightTiles,
-            onTileCached = onUpdateCachedCount,
+            onTileLoaded = onTileLoaded,
             onTransformGesture = onTransformMap
         )
 
@@ -1228,13 +1246,15 @@ private fun InteractiveOfflineMapCanvas(
     crisisMode: Boolean,
     showStreetTiles: Boolean,
     tileBitmapCache: MutableMap<String, ImageBitmap>,
+    tileRenderVersion: Int,
     tileDownloadScope: CoroutineScope,
     inFlightTiles: MutableSet<String>,
-    onTileCached: () -> Unit,
+    onTileLoaded: (newlySavedToDisk: Boolean) -> Unit,
     onTransformGesture: (dLat: Double, dLon: Double, zoomFactor: Float) -> Unit
 ) {
     val currentCenterLat by rememberUpdatedState(centerLat)
     val currentZoomFloat by rememberUpdatedState(zoomFloat)
+    val currentOnTileLoaded by rememberUpdatedState(onTileLoaded)
 
     // Zoom inteiro do tile OpenStreetMap (10 a 19) e fator de escala contínuo entre níveis
     val tileZoom = zoomFloat.toInt().coerceIn(10, 19)
@@ -1246,7 +1266,7 @@ private fun InteractiveOfflineMapCanvas(
     val currentCenterTileX = ((centerLon + 180.0) / 360.0 * n).toInt()
     val currentCenterTileY = ((1.0 - ln(tan(centerLatRad) + 1.0 / cos(centerLatRad)) / PI) / 2.0 * n).toInt()
 
-    // Dispara carregamento assíncrono em escopo não-cancelável apenas quando a grade de tiles muda
+    // Dispara carregamento assíncrono em fila controlada (máx. 3 conexões paralelas) quando a grade de tiles muda
     LaunchedEffect(currentCenterTileX, currentCenterTileY, tileZoom, showStreetTiles) {
         if (!showStreetTiles) return@LaunchedEffect
         val maxTile = n.toInt() - 1
@@ -1256,11 +1276,12 @@ private fun InteractiveOfflineMapCanvas(
             if (tileBitmapCache.containsKey(key) || !inFlightTiles.add(key)) return
             tileDownloadScope.launch {
                 try {
-                    val bmp = loadOrDownloadTile(context, z, tx, ty)
-                    if (bmp != null) {
+                    val res = loadOrDownloadTileWithStatus(context, z, tx, ty)
+                    if (res != null) {
+                        val (bmp, newlySaved) = res
                         withContext(Dispatchers.Main) {
                             tileBitmapCache[key] = bmp
-                            onTileCached()
+                            currentOnTileLoaded(newlySaved)
                         }
                     }
                 } finally {
@@ -1269,13 +1290,16 @@ private fun InteractiveOfflineMapCanvas(
             }
         }
 
-        // 1º: Anel central 3x3 (prioridade máxima)
-        for (dx in -1..1) {
-            for (dy in -1..1) {
-                val tx = (currentCenterTileX + dx).coerceIn(0, maxTile)
-                val ty = (currentCenterTileY + dy).coerceIn(0, maxTile)
-                requestTileAsync(tileZoom, tx, ty)
-            }
+        // 1º: Anel central 3x3 (prioridade máxima: começa pelo próprio tile central (0,0))
+        val priorityOffsets = listOf(
+            0 to 0,
+            0 to -1, 0 to 1, -1 to 0, 1 to 0,
+            -1 to -1, 1 to -1, -1 to 1, 1 to 1
+        )
+        for ((dx, dy) in priorityOffsets) {
+            val tx = (currentCenterTileX + dx).coerceIn(0, maxTile)
+            val ty = (currentCenterTileY + dy).coerceIn(0, maxTile)
+            requestTileAsync(tileZoom, tx, ty)
         }
 
         // 2º: Tiles pais (zoom - 1) para fallback instantâneo durante zoom in/out
@@ -1447,7 +1471,7 @@ private fun InteractiveOfflineMapCanvas(
     Canvas(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (crisisMode) Color.Black else Color(0xFF08101E))
+            .background(if (crisisMode) Color.Black else Color(0xFF0B1526))
             // Duplo-toque para dar zoom rápido na rua
             .pointerInput(Unit) {
                 detectTapGestures(
@@ -1458,7 +1482,7 @@ private fun InteractiveOfflineMapCanvas(
             }
             // Gestor customizado que consome 100% dos eventos de toque no mapa (impede o LazyColumn de roubar o arraste vertical ou a pinça!)
             .pointerInput(Unit) {
-                val baseTilePx = 280.dp.toPx().toDouble()
+                val baseTilePx = 256.dp.toPx().toDouble()
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     do {
@@ -1477,12 +1501,16 @@ private fun InteractiveOfflineMapCanvas(
                 }
             }
     ) {
+        // Garante invalidação imediata do DrawScope sempre que um novo tile chega na memória
+        val renderTick = tileRenderVersion
+        if (renderTick < 0) return@Canvas
+
         val w = size.width
         val h = size.height
 
-        // Tamanho físico real do tile na tela do celular (280.dp escalado pelo zoom fracionário):
+        // Tamanho físico real do tile na tela do celular (256.dp escalado pelo zoom fracionário):
         // Garante que os nomes das ruas fiquem grandes e nítidos em telas FullHD/QHD!
-        val tileSizePx = 280.dp.toPx() * subTileScale
+        val tileSizePx = 256.dp.toPx() * subTileScale
 
         fun latLonToWorldPx(lat: Double, lon: Double): Pair<Double, Double> {
             val clampedLat = lat.coerceIn(-85.0511, 85.0511)
@@ -1501,7 +1529,9 @@ private fun InteractiveOfflineMapCanvas(
             return Offset(sx, sy)
         }
 
-        // 1. Camada de Tiles OpenStreetMap com Fallback Hierárquico (Parent/Child Tile Scaling)
+        var loadedTilesInView = 0
+
+        // 1. Camada de Tiles OpenStreetMap com Fallback Hierárquico (Parent/Child Tile Scaling) + Blueprint de Quadras
         if (showStreetTiles) {
             val centerTileX = (centerWorldX / tileSizePx).toInt()
             val centerTileY = (centerWorldY / tileSizePx).toInt()
@@ -1519,11 +1549,12 @@ private fun InteractiveOfflineMapCanvas(
                         val key = "$tileZoom/$tx/$ty"
                         val bmp = tileBitmapCache[key]
                         if (bmp != null) {
+                            loadedTilesInView++
                             drawImage(
                                 image = bmp,
                                 dstOffset = IntOffset(tileScreenX, tileScreenY),
                                 dstSize = dstSizePx,
-                                alpha = if (crisisMode) 0.70f else 0.98f,
+                                alpha = if (crisisMode) 0.75f else 1.0f,
                                 filterQuality = FilterQuality.High
                             )
                         } else {
@@ -1547,10 +1578,11 @@ private fun InteractiveOfflineMapCanvas(
                                         srcSize = IntSize(srcW, srcH),
                                         dstOffset = IntOffset(tileScreenX, tileScreenY),
                                         dstSize = dstSizePx,
-                                        alpha = if (crisisMode) 0.65f else 0.94f,
+                                        alpha = if (crisisMode) 0.70f else 0.96f,
                                         filterQuality = FilterQuality.Medium
                                     )
                                     drawnFallback = true
+                                    loadedTilesInView++
                                     break
                                 }
                             }
@@ -1570,11 +1602,41 @@ private fun InteractiveOfflineMapCanvas(
                                                     tileScreenY + (cy * tileSizePx / 2.0).roundToInt()
                                                 ),
                                                 dstSize = IntSize(halfSize, halfSize),
-                                                alpha = if (crisisMode) 0.68f else 0.96f,
+                                                alpha = if (crisisMode) 0.72f else 0.98f,
                                                 filterQuality = FilterQuality.Medium
                                             )
+                                            drawnFallback = true
                                         }
                                     }
+                                }
+                            }
+
+                            // Fallback 3: Enquanto o tile está baixando (ou se 100% sem internet numa região nova),
+                            // desenha o reticulado urbano tático de quadras para que o mapa nunca fique escuro/vazio
+                            if (!drawnFallback) {
+                                val tileF = tileSizePx.toFloat()
+                                val sx = tileScreenX.toFloat()
+                                val sy = tileScreenY.toFloat()
+                                drawRect(
+                                    color = if (crisisMode) Color(0xFF090E17) else Color(0xFF132036),
+                                    topLeft = Offset(sx, sy),
+                                    size = androidx.compose.ui.geometry.Size(tileF, tileF)
+                                )
+                                val subStep = tileF / 4f
+                                for (k in 0..3) {
+                                    val lineOffset = k * subStep
+                                    drawLine(
+                                        color = Color(0xFF334155).copy(alpha = 0.55f),
+                                        start = Offset(sx + lineOffset, sy),
+                                        end = Offset(sx + lineOffset, sy + tileF),
+                                        strokeWidth = if (k == 0) 2.2f else 1.1f
+                                    )
+                                    drawLine(
+                                        color = Color(0xFF334155).copy(alpha = 0.55f),
+                                        start = Offset(sx, sy + lineOffset),
+                                        end = Offset(sx + tileF, sy + lineOffset),
+                                        strokeWidth = if (k == 0) 2.2f else 1.1f
+                                    )
                                 }
                             }
                         }
@@ -1584,11 +1646,12 @@ private fun InteractiveOfflineMapCanvas(
         }
 
         // 2. Grade Cartográfica Tática Discreta
+        val gridAlpha = if (loadedTilesInView > 0 && showStreetTiles) 0.14f else 0.35f
         val gridStep = 72.dp.toPx()
         var gx = (w / 2f) % gridStep
         while (gx < w) {
             drawLine(
-                color = Color(0xFF1E293B).copy(alpha = 0.22f),
+                color = Color(0xFF38BDF8).copy(alpha = gridAlpha),
                 start = Offset(gx, 0f),
                 end = Offset(gx, h),
                 strokeWidth = 1f
@@ -1598,7 +1661,7 @@ private fun InteractiveOfflineMapCanvas(
         var gy = (h / 2f) % gridStep
         while (gy < h) {
             drawLine(
-                color = Color(0xFF1E293B).copy(alpha = 0.22f),
+                color = Color(0xFF38BDF8).copy(alpha = gridAlpha),
                 start = Offset(0f, gy),
                 end = Offset(w, gy),
                 strokeWidth = 1f
@@ -1606,101 +1669,108 @@ private fun InteractiveOfflineMapCanvas(
             gy += gridStep
         }
 
-        // 3. Cartografia Vetorial Offline do Rio de Janeiro (Lagoa Rodrigo de Freitas + Orla)
-        val lagoaPath = Path().apply {
-            lagoaPolygon.forEachIndexed { idx, (lat, lon) ->
-                val pt = toScreen(lat, lon)
-                if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
+        // 3. Cartografia Vetorial Offline do Rio de Janeiro (apenas quando a câmera está próxima à região para evitar Paths fora de tela)
+        val isNearRioZonaSul = abs(centerLat - (-22.95)) < 0.28 && abs(centerLon - (-43.20)) < 0.28
+        if (isNearRioZonaSul) {
+            val lagoaPath = Path().apply {
+                lagoaPolygon.forEachIndexed { idx, (lat, lon) ->
+                    val pt = toScreen(lat, lon)
+                    if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
+                }
+                close()
             }
-            close()
-        }
-        drawPath(
-            path = lagoaPath,
-            color = Color(0xFF0284C7).copy(alpha = if (showStreetTiles) 0.16f else 0.35f)
-        )
-        drawPath(
-            path = lagoaPath,
-            color = Color(0xFF38BDF8).copy(alpha = 0.55f),
-            style = Stroke(width = 1.5.dp.toPx())
-        )
+            drawPath(
+                path = lagoaPath,
+                color = Color(0xFF0284C7).copy(alpha = if (showStreetTiles && loadedTilesInView > 0) 0.14f else 0.38f)
+            )
+            drawPath(
+                path = lagoaPath,
+                color = Color(0xFF38BDF8).copy(alpha = 0.55f),
+                style = Stroke(width = 1.5.dp.toPx())
+            )
 
-        val coastPath = Path().apply {
-            coastlineOrla.forEachIndexed { idx, (lat, lon) ->
-                val pt = toScreen(lat, lon)
-                if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
-            }
-        }
-        drawPath(
-            path = coastPath,
-            color = Color(0xFF0EA5E9).copy(alpha = 0.50f),
-            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-        )
-
-        // Vias e Nomes das Ruas Vetoriais (Sempre disponíveis, mesmo 100% sem cache de tile)
-        val roadLabelPaint = Paint().apply {
-            color = android.graphics.Color.argb(245, 254, 240, 138)
-            textSize = 11.5.sp.toPx()
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-            isAntiAlias = true
-            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
-        }
-
-        namedRoads.forEach { road ->
-            val roadPath = Path().apply {
-                road.points.forEachIndexed { idx, (lat, lon) ->
+            val coastPath = Path().apply {
+                coastlineOrla.forEachIndexed { idx, (lat, lon) ->
                     val pt = toScreen(lat, lon)
                     if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
                 }
             }
-            if (!showStreetTiles) {
-                drawPath(
-                    path = roadPath,
-                    color = Color(0xFF64748B).copy(alpha = 0.75f),
-                    style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
-                )
+            drawPath(
+                path = coastPath,
+                color = Color(0xFF0EA5E9).copy(alpha = 0.50f),
+                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+
+            val roadLabelPaint = Paint().apply {
+                color = android.graphics.Color.argb(245, 254, 240, 138)
+                textSize = 11.5.sp.toPx()
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.CENTER
+                isAntiAlias = true
+                setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
             }
-            if (zoomFloat >= 13.5f || !showStreetTiles) {
-                val lblPt = toScreen(road.labelLat, road.labelLon)
-                if (lblPt.x in 20f..(w - 20f) && lblPt.y in 20f..(h - 20f)) {
-                    drawContext.canvas.nativeCanvas.drawText(road.name, lblPt.x, lblPt.y, roadLabelPaint)
+
+            namedRoads.forEach { road ->
+                if (!showStreetTiles || loadedTilesInView == 0) {
+                    val roadPath = Path().apply {
+                        road.points.forEachIndexed { idx, (lat, lon) ->
+                            val pt = toScreen(lat, lon)
+                            if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
+                        }
+                    }
+                    drawPath(
+                        path = roadPath,
+                        color = Color(0xFF94A3B8).copy(alpha = 0.80f),
+                        style = Stroke(width = 3.2.dp.toPx(), cap = StrokeCap.Round)
+                    )
+                }
+                if (zoomFloat >= 13.5f || !showStreetTiles || loadedTilesInView == 0) {
+                    val lblPt = toScreen(road.labelLat, road.labelLon)
+                    if (lblPt.x in 20f..(w - 20f) && lblPt.y in 20f..(h - 20f)) {
+                        drawContext.canvas.nativeCanvas.drawText(road.name, lblPt.x, lblPt.y, roadLabelPaint)
+                    }
                 }
             }
-        }
 
-        // Rótulos de Bairros
-        val neighborhoodPaint = Paint().apply {
-            color = android.graphics.Color.argb(220, 241, 245, 249)
-            textSize = if (zoomFloat >= 15f) 12.sp.toPx() else 10.sp.toPx()
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-            isAntiAlias = true
-            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
-        }
-        neighborhoods.forEach { (name, lat, lon) ->
-            val pt = toScreen(lat, lon)
-            if (pt.x in 0f..w && pt.y in 0f..h) {
-                drawContext.canvas.nativeCanvas.drawText(name, pt.x, pt.y, neighborhoodPaint)
+            val neighborhoodPaint = Paint().apply {
+                color = android.graphics.Color.argb(225, 241, 245, 249)
+                textSize = if (zoomFloat >= 15f) 12.sp.toPx() else 10.sp.toPx()
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.CENTER
+                isAntiAlias = true
+                setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
+            }
+            neighborhoods.forEach { (name, lat, lon) ->
+                val pt = toScreen(lat, lon)
+                if (pt.x in 0f..w && pt.y in 0f..h) {
+                    drawContext.canvas.nativeCanvas.drawText(name, pt.x, pt.y, neighborhoodPaint)
+                }
             }
         }
 
         // 4. TRILHA DE MOVIMENTAÇÃO DO USUÁRIO (BREADCRUMB TRAIL)
         if (movementTrail.size >= 2) {
             val trailPath = Path()
+            var hasVisibleSegment = false
             movementTrail.forEachIndexed { index, (tLat, tLon) ->
                 val pt = toScreen(tLat, tLon)
+                if (pt.x in -w..(2 * w) && pt.y in -h..(2 * h)) {
+                    hasVisibleSegment = true
+                }
                 if (index == 0) trailPath.moveTo(pt.x, pt.y) else trailPath.lineTo(pt.x, pt.y)
             }
-            drawPath(
-                path = trailPath,
-                color = Color(0xFF0284C7).copy(alpha = 0.50f),
-                style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-            )
-            drawPath(
-                path = trailPath,
-                color = Color(0xFF38BDF8),
-                style = Stroke(width = 3.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-            )
+            if (hasVisibleSegment) {
+                drawPath(
+                    path = trailPath,
+                    color = Color(0xFF0284C7).copy(alpha = 0.55f),
+                    style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
+                drawPath(
+                    path = trailPath,
+                    color = Color(0xFF38BDF8),
+                    style = Stroke(width = 3.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
+            }
             movementTrail.forEach { (tLat, tLon) ->
                 val pt = toScreen(tLat, tLon)
                 if (pt.x in 0f..w && pt.y in 0f..h) {
@@ -1717,10 +1787,14 @@ private fun InteractiveOfflineMapCanvas(
         val userScreen = toScreen(userLat, userLon)
         if (focusedPoi != null) {
             val targetScreen = toScreen(focusedPoi.latitude, focusedPoi.longitude)
+            val clampedTargetX = targetScreen.x.coerceIn(-w, 2 * w)
+            val clampedTargetY = targetScreen.y.coerceIn(-h, 2 * h)
+            val clampedUserX = userScreen.x.coerceIn(-w, 2 * w)
+            val clampedUserY = userScreen.y.coerceIn(-h, 2 * h)
             drawLine(
                 color = Color(0xFFFBBF24),
-                start = userScreen,
-                end = targetScreen,
+                start = Offset(clampedUserX, clampedUserY),
+                end = Offset(clampedTargetX, clampedTargetY),
                 strokeWidth = 3.dp.toPx(),
                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(16f, 10f), 0f)
             )
@@ -1773,8 +1847,17 @@ private fun InteractiveOfflineMapCanvas(
             }
         }
 
-        // 7. Pino da Posição Atual do Usuário + Cone de Direção de Movimento + Nome da Rua Atual
+        // 7. Pino da Posição Atual do Usuário + Anel Tático + Cone de Direção + Nome da Rua Atual
         if (userScreen.x in -60f..(w + 60f) && userScreen.y in -60f..(h + 60f)) {
+            if (!showStreetTiles || loadedTilesInView == 0) {
+                drawCircle(
+                    color = Color(0xFF38BDF8).copy(alpha = 0.25f),
+                    radius = 58.dp.toPx(),
+                    center = userScreen,
+                    style = Stroke(width = 1.2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f))
+                )
+            }
+
             drawCircle(
                 color = if (isLiveTracking) Color(0xFF10B981).copy(alpha = 0.30f) else Color(0xFF0284C7).copy(alpha = 0.30f),
                 radius = if (userAccuracyMeters > 0f) userAccuracyMeters.coerceIn(18f, 42f).dp.toPx() else 22.dp.toPx(),
@@ -1820,17 +1903,17 @@ private fun InteractiveOfflineMapCanvas(
             )
 
             val userStreetPaint = Paint().apply {
-                color = android.graphics.Color.argb(255, 167, 243, 208)
-                textSize = 11.5.sp.toPx()
+                color = android.graphics.Color.argb(255, 254, 240, 138)
+                textSize = 12.sp.toPx()
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 textAlign = Paint.Align.CENTER
                 isAntiAlias = true
                 setShadowLayer(8f, 0f, 1.5f, android.graphics.Color.BLACK)
             }
             drawContext.canvas.nativeCanvas.drawText(
-                currentStreetAddress.take(34),
+                currentStreetAddress.take(36),
                 userScreen.x,
-                userScreen.y - 15.dp.toPx(),
+                userScreen.y - 16.dp.toPx(),
                 userStreetPaint
             )
         }
@@ -1838,19 +1921,21 @@ private fun InteractiveOfflineMapCanvas(
 }
 
 /**
- * Remove a pasta legada `osm_tiles` que continha tiles "403 Access blocked" (6725 bytes)
- * e qualquer arquivo corrompido na pasta nova.
+ * Remove pastas legadas (`osm_tiles`, `osm_tiles_v2`, `osm_tiles_v3`) que continham tiles "403 Access blocked"
+ * ou tiles cinzas "Map Data Not Available" do ArcGIS em zoom alto, garantindo cache limpo em `osm_tiles_v4`.
  */
 private fun purgePoisonedLegacyTiles(context: Context) {
     try {
-        val legacyDir = File(context.filesDir, "osm_tiles")
-        if (legacyDir.exists()) {
-            legacyDir.deleteRecursively()
+        listOf("osm_tiles", "osm_tiles_v2", "osm_tiles_v3").forEach { oldName ->
+            val oldDir = File(context.filesDir, oldName)
+            if (oldDir.exists()) {
+                oldDir.deleteRecursively()
+            }
         }
         val currentDir = File(context.filesDir, TILE_CACHE_DIR_NAME)
         if (currentDir.exists()) {
             currentDir.walkTopDown().forEach { f ->
-                if (f.isFile && (f.length() == 6725L || f.length() == 6672L || f.length() == 2049L || f.length() < 500L)) {
+                if (f.isFile && (f.length() == 6725L || f.length() == 6672L || f.length() == 2049L || f.length() < 60L)) {
                     f.delete()
                 }
             }
@@ -1860,29 +1945,34 @@ private fun purgePoisonedLegacyTiles(context: Context) {
 }
 
 /**
- * Carrega um tile 256x256 do cache offline validado (`osm_tiles_v3`) ou faz o download
- * a partir do servidor oficial OpenStreetMap (validando `x-blocked == null`) com fallback
- * automático para o servidor ArcGIS World Street Map (`$zoom/$y/$x`).
+ * Carrega um tile 256x256 do cache offline validado (`osm_tiles_v4`) ou faz o download
+ * a partir de múltiplos servidores oficiais OpenStreetMap (OSM Oficial, OSM.de, OSM.fr)
+ * que suportam até Zoom 19 no Brasil inteiro com todos os nomes de ruas.
+ * Retorna `Pair(ImageBitmap, newlySavedToDisk)`.
  */
-private fun loadOrDownloadTile(
+private fun loadOrDownloadTileWithStatus(
     context: Context,
     zoom: Int,
     x: Int,
     y: Int
-): ImageBitmap? {
+): Pair<ImageBitmap, Boolean>? {
     return try {
         val tileFile = File(context.filesDir, "$TILE_CACHE_DIR_NAME/$zoom/$x/$y.png")
-        if (tileFile.exists() && tileFile.length() > 800L && tileFile.length() != 6725L && tileFile.length() != 6672L && tileFile.length() != 2049L) {
+        // Nota: tiles válidos de oceano/lagoa no OSM têm 103 bytes! Rejeitamos apenas tamanhos conhecidos de erro (6725, 6672, 2049) ou vazios (< 60)
+        if (tileFile.exists() && tileFile.length() >= 60L &&
+            tileFile.length() != 6725L && tileFile.length() != 6672L && tileFile.length() != 2049L
+        ) {
             val bmp = BitmapFactory.decodeFile(tileFile.absolutePath)
-            if (bmp != null) return bmp.asImageBitmap()
+            if (bmp != null) return Pair(bmp.asImageBitmap(), false)
         }
 
         tileFile.parentFile?.mkdirs()
 
-        // Nota: no ArcGIS World_Street_Map a ordem da URL é /tile/{z}/{y}/{x}
         val candidateUrls = listOf(
             "https://tile.openstreetmap.org/$zoom/$x/$y.png",
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/$zoom/$y/$x"
+            "https://tile.openstreetmap.de/$zoom/$x/$y.png",
+            "https://a.tile.openstreetmap.fr/osmfr/$zoom/$x/$y.png",
+            "https://b.tile.openstreetmap.fr/osmfr/$zoom/$x/$y.png"
         )
 
         for (urlStr in candidateUrls) {
@@ -1891,22 +1981,22 @@ private fun loadOrDownloadTile(
                     connectTimeout = 4000
                     readTimeout = 4000
                     setRequestProperty("User-Agent", VALID_TILE_USER_AGENT)
-                    setRequestProperty("Accept", "image/png,image/jpeg,image/*;q=0.8")
+                    setRequestProperty("Accept", "image/png,image/*;q=0.9")
                 }
 
                 val blockedHeader = conn.getHeaderField("x-blocked")
                 if (conn.responseCode == 200 && blockedHeader == null) {
                     val bytes = conn.inputStream.use { it.readBytes() }
-                    if (bytes.size > 800 && bytes.size != 6725 && bytes.size != 6672 && bytes.size != 2049) {
+                    if (bytes.size >= 60 && bytes.size != 6725 && bytes.size != 6672 && bytes.size != 2049) {
                         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                         if (bmp != null) {
                             FileOutputStream(tileFile).use { it.write(bytes) }
-                            return bmp.asImageBitmap()
+                            return Pair(bmp.asImageBitmap(), true)
                         }
                     }
                 }
             } catch (_: Exception) {
-                // Tenta o próximo servidor em caso de falha momentânea
+                // Tenta o próximo espelho OSM em caso de falha momentânea
             }
         }
         null
@@ -2003,7 +2093,8 @@ private suspend fun preloadRegionTiles(
     centerLat: Double,
     centerLon: Double,
     zoom: Int,
-    cache: MutableMap<String, ImageBitmap>
+    cache: MutableMap<String, ImageBitmap>,
+    onEachTileLoaded: () -> Unit = {}
 ): Int = withContext(Dispatchers.IO) {
     var count = 0
     val baseZ = zoom.coerceIn(14, 18)
@@ -2020,10 +2111,12 @@ private suspend fun preloadRegionTiles(
                 val tx = (cx + dx).coerceIn(0, maxTile)
                 val ty = (cy + dy).coerceIn(0, maxTile)
                 val key = "$z/$tx/$ty"
-                val bmp = loadOrDownloadTile(context, z, tx, ty)
-                if (bmp != null) {
+                val res = loadOrDownloadTileWithStatus(context, z, tx, ty)
+                if (res != null) {
+                    val (bmp, _) = res
                     withContext(Dispatchers.Main) {
                         cache[key] = bmp
+                        onEachTileLoaded()
                     }
                     count++
                 }
@@ -2036,7 +2129,7 @@ private suspend fun preloadRegionTiles(
 private fun countCachedTilesOnDisk(context: Context): Int {
     val root = File(context.filesDir, TILE_CACHE_DIR_NAME)
     if (!root.exists()) return 0
-    return root.walkTopDown().count { it.isFile && it.extension == "png" && it.length() > 800L }
+    return root.walkTopDown().count { it.isFile && it.extension == "png" && it.length() >= 60L }
 }
 
 @Composable
