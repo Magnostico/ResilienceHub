@@ -79,6 +79,7 @@ class PdfRagManager(
     private val inferenceMutex = Mutex()
     private var cachedLiteRtEngine: Engine? = null
     private var cachedLiteRtConversation: Conversation? = null
+    private var estimatedConversationTokens: Int = 0
     private var cachedMediaPipeLlm: LlmInference? = null
     private var loadedModelPath: String? = null
     private var loadedBackendLabel: String = ""
@@ -740,6 +741,7 @@ class PdfRagManager(
             temperature = DEFAULT_TEMPERATURE
         )
 
+        estimatedConversationTokens = 120
         return engine.createConversation(
             ConversationConfig(
                 systemInstruction = Contents.of(systemInstructionText),
@@ -790,6 +792,7 @@ class PdfRagManager(
         } catch (_: Throwable) {
         }
         cachedLiteRtConversation = null
+        estimatedConversationTokens = 0
 
         try {
             cachedLiteRtEngine?.close()
@@ -959,7 +962,7 @@ class PdfRagManager(
         try {
             // Se o contexto acumulado na sessão se aproximar do limite de tokens, renova a Conversation preventivamente
             var conversation = cachedLiteRtConversation
-            val currentTokens = try { conversation?.tokenCount ?: 0 } catch (_: Throwable) { 0 }
+            val currentTokens = estimatedConversationTokens
             if (conversation == null || !conversation.isAlive || currentTokens > (DEFAULT_MAX_TOKEN - 320)) {
                 try { conversation?.close() } catch (_: Throwable) {}
                 conversation = createNewLiteRtConversation(engine)
@@ -1038,6 +1041,7 @@ class PdfRagManager(
             }
 
             if (finalAnswer.isNotBlank()) {
+                estimatedConversationTokens += ((userMessageText.length + finalAnswer.length) / 4).coerceAtLeast(16)
                 onPartialAnswer(finalAnswer)
                 finalAnswer
             } else {
