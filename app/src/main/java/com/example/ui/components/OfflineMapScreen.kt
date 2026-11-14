@@ -9,8 +9,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -66,6 +69,10 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.*
 
+private const val TILE_CACHE_DIR_NAME = "osm_tiles_v3"
+private const val VALID_TILE_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ResilienceHub/1.0 (https://github.com/Magnostico/ResilienceHub)"
+
 private data class NamedRoadVector(
     val name: String,
     val labelLat: Double,
@@ -74,11 +81,11 @@ private data class NamedRoadVector(
 )
 
 /**
- * Motor Cartográfico Híbrido 100% Kotlin/Compose de Alta Nitidez:
- * 1. Projeção Web Mercator com Escala DPI Ampliada (300.dp por tile + FilterQuality.High) para que os nomes das ruas fiquem grandes e nítidos no celular.
- * 2. Fallback Multi-Nível de Tiles (Parent/Child Tile Scaling): ao dar Zoom In ou Zoom Out, recorta e escala instantaneamente o tile pai/filho em memória sem nunca deixar a tela preta ou piscando.
- * 3. Carregamento Assíncrono Não-Cancelável (SupervisorJob + Dispatchers.IO) com espelhos múltiplos para não interromper downloads durante o movimento em tempo real ou arraste.
- * 4. Identificação ao vivo do nome da rua/avenida atual (Geocoder + Cache Offline + Vetores) tanto no Pulso GPS (1x) quanto no Rastreio Vivo.
+ * Motor Cartográfico Híbrido 100% Kotlin/Compose:
+ * 1. Projeção Web Mercator com Escala DPI Nativa (280.dp por tile + FilterQuality.High) para exibir nomes de todas as ruas com nitidez.
+ * 2. Purga automática de tiles antigos bloqueados ("403 Access blocked") e validação estrita de cabeçalho HTTP (`x-blocked == null`) + espelho ArcGIS World Street Map.
+ * 3. Fallback Multi-Nível (Parent/Child Tile Scaling) para que o Zoom In e Zoom Out nunca fiquem com blocos escuros/vazios.
+ * 4. Gestos dedicados (`awaitEachGesture`) que consomem o toque imediatamente no mapa sem deixar o `LazyColumn` roubar o arraste vertical ou a pinça.
  */
 @Composable
 fun OfflineMapScreen(
@@ -105,20 +112,36 @@ fun OfflineMapScreen(
     val focusedPoi = navList.find { it.poiId == selectedPoiId } ?: navList.firstOrNull()
     val focusedPoiEntity = state.pois.find { it.id == focusedPoi?.poiId }
 
-    // Estado da câmera do mapa: inicia em 16.8f (nível de rua detalhado para exibir nomes de todas as ruas)
+    // Inicia em nível de rua (16.5f) onde todos os nomes de ruas e avenidas aparecem com clareza
     var mapCenterLat by remember { mutableDoubleStateOf(state.currentLat) }
     var mapCenterLon by remember { mutableDoubleStateOf(state.currentLon) }
-    var mapZoomFloat by remember { mutableFloatStateOf(16.8f) }
+    var mapZoomFloat by remember { mutableFloatStateOf(16.5f) }
     val mapZoomInt = mapZoomFloat.toInt().coerceIn(10, 19)
 
     var isMapFullscreen by remember { mutableStateOf(false) }
     var showBottomPoisInFullscreen by remember { mutableStateOf(true) }
-    var showPoiDrawerOnMainScreen by remember { mutableStateOf(false) }
     var autoFollowUser by remember { mutableStateOf(true) }
     var showStreetTiles by remember { mutableStateOf(true) }
     var currentStreetAddress by remember { mutableStateOf("Localizando rua/avenida...") }
 
-    // Sincroniza a câmera imediatamente tanto no Pulso GPS (1x) quanto no Rastreio Vivo em movimento
+    // Cache em memória e contador de blocos salvos em disco
+    val tileBitmapCache = remember { mutableStateMapOf<String, ImageBitmap>() }
+    var cachedTilesCount by remember {
+        mutableIntStateOf(countCachedTilesOnDisk(context))
+    }
+    var isPreloadingTiles by remember { mutableStateOf(false) }
+    var preloadStatusText by remember { mutableStateOf<String?>(null) }
+    var showConfirmClearPois by remember { mutableStateOf(false) }
+
+    // Limpa na inicialização qualquer tile antigo corrompido ("403 Access blocked") da pasta legada osm_tiles
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            purgePoisonedLegacyTiles(context)
+        }
+        cachedTilesCount = countCachedTilesOnDisk(context)
+    }
+
+    // Quando o GPS atualiza a posição (Pulso 1x ou Rastreio Vivo) e o modo Auto-Seguir está ativo, move o centro do mapa junto com o usuário
     LaunchedEffect(state.currentLat, state.currentLon, state.gpsFixCount) {
         if (autoFollowUser) {
             mapCenterLat = state.currentLat
@@ -126,7 +149,7 @@ fun OfflineMapScreen(
         }
     }
 
-    // Resolve o nome da rua/avenida da posição atual do usuário (com cache em disco para funcionar offline)
+    // Atualiza o nome da rua/avenida atual conforme o usuário se move ou aciona o Pulso GPS
     LaunchedEffect(
         (state.currentLat * 1000).roundToInt(),
         (state.currentLon * 1000).roundToInt(),
@@ -138,437 +161,455 @@ fun OfflineMapScreen(
         }
     }
 
-    // Cache em memória de tiles e pré-carregamento inicial dos tiles já salvos em disco
-    val tileBitmapCache = remember { mutableStateMapOf<String, ImageBitmap>() }
-    var cachedTilesCount by remember {
-        mutableIntStateOf(countCachedTilesOnDisk(context))
-    }
-    var isPreloadingTiles by remember { mutableStateOf(false) }
-    var preloadStatusText by remember { mutableStateOf<String?>(null) }
-    var showConfirmClearPois by remember { mutableStateOf(false) }
-
-    // Layout principal fixo (sem LazyColumn roubando gestos de arraste vertical ou pinça no mapa!)
-    Column(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
             .testTag("offline_map_screen")
     ) {
-        // --- 1. PAINEL SUPERIOR COMPACTO DE TELEMETRIA, RUA ATUAL & CONTROLES GPS ---
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
-            ),
-            shape = RoundedCornerShape(12.dp),
-            border = androidx.compose.foundation.BorderStroke(
-                1.dp,
-                if (state.isLiveTracking) Color(0xFF10B981)
-                else if (crisisMode) MaterialTheme.colorScheme.primary
-                else Color(0xFF334155)
-            ),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(10.dp)) {
-                // Linha de Título + Rua Atual + Botão Tela Cheia
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.Explore,
-                                contentDescription = null,
-                                tint = Color(0xFFFBBF24),
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Mapa Tático & Ruas em Tempo Real",
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 14.sp,
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "📍 $currentStreetAddress",
-                            fontSize = 11.sp,
-                            color = Color(0xFFFDE047),
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = state.gpsProviderInfo,
-                            fontSize = 10.sp,
-                            color = if (state.isLiveTracking) Color(0xFF34D399) else Color(0xFF38BDF8),
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    Button(
-                        onClick = { isMapFullscreen = true },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF0284C7),
-                            contentColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .height(34.dp)
-                            .testTag("btn_open_fullscreen_map")
+        // --- 1. PAINEL BÚSSOLA, RUA ATUAL, TELEMETRIA DE MOVIMENTO & CONTROLES GPS ---
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (state.isLiveTracking) Color(0xFF10B981)
+                    else if (crisisMode) MaterialTheme.colorScheme.primary
+                    else Color(0xFF334155)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    // Linha de Título + Botão Tela Cheia
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(
-                            Icons.Default.Fullscreen,
-                            contentDescription = "Abrir Mapa em Tela Cheia",
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Tela Cheia", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Botões de Rastreio Vivo (Em Movimento) e GPS Pulso (1x)
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Button(
-                        onClick = {
-                            autoFollowUser = true
-                            viewModel.toggleLiveGpsTracking()
-                            mapCenterLat = state.currentLat
-                            mapCenterLon = state.currentLon
-                            if (mapZoomFloat < 16.5f) mapZoomFloat = 16.8f
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (state.isLiveTracking) Color(0xFF059669) else Color(0xFF1E293B),
-                            contentColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .weight(1.15f)
-                            .height(36.dp)
-                            .testTag("btn_live_tracking_toggle")
-                    ) {
-                        Icon(
-                            if (state.isLiveTracking) Icons.Default.DirectionsRun else Icons.Default.LocationSearching,
-                            contentDescription = null,
-                            tint = if (state.isLiveTracking) Color.White else Color(0xFF34D399),
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text(
-                            text = if (state.isLiveTracking) "Rastreio Vivo: ON" else "Rastrear Movimento",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    Button(
-                        onClick = {
-                            autoFollowUser = true
-                            viewModel.triggerSingleShotGpsPulse()
-                            mapCenterLat = state.currentLat
-                            mapCenterLon = state.currentLon
-                            if (mapZoomFloat < 16.5f) mapZoomFloat = 16.8f
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFF59E0B),
-                            contentColor = Color(0xFF090D16)
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(36.dp)
-                            .testTag("btn_gps_pulse_map")
-                    ) {
-                        Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "GPS Pulso (1x)",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Barra de Telemetria + Destino Selecionado Compacto
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF090D16), RoundedCornerShape(8.dp))
-                        .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    TelemetryItem(
-                        label = "VELOCIDADE",
-                        value = String.format(Locale.US, "%.1f km/h", state.currentSpeedKmh),
-                        valueColor = Color(0xFF38BDF8)
-                    )
-                    TelemetryItem(
-                        label = "RUMO",
-                        value = "${state.currentHeadingDegrees.toInt()}°",
-                        valueColor = Color(0xFFFBBF24)
-                    )
-                    if (focusedPoi != null) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f).padding(horizontal = 6.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Navigation,
-                                contentDescription = null,
-                                tint = Color(0xFFFBBF24),
-                                modifier = Modifier
-                                    .size(16.dp)
-                                    .rotate(focusedPoi.bearingDegrees.toFloat())
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Column {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Explore,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFBBF24),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = focusedPoi.poiTitle,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
+                                    text = "Navegação & Mapa Tático Offline",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 15.sp,
                                     color = Color.White,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Text(
-                                    text = "${focusedPoi.distanceFormatted} (${focusedPoi.cardinalDetailed})",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF34D399),
-                                    maxLines = 1
-                                )
                             }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "📍 $currentStreetAddress",
+                                fontSize = 12.sp,
+                                color = Color(0xFFFDE047),
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = state.gpsProviderInfo,
+                                fontSize = 11.sp,
+                                color = if (state.isLiveTracking) Color(0xFF34D399) else Color(0xFF38BDF8),
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
-                    } else {
+
+                        Button(
+                            onClick = { isMapFullscreen = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF0284C7),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("btn_open_fullscreen_map")
+                        ) {
+                            Icon(
+                                Icons.Default.Fullscreen,
+                                contentDescription = "Abrir Mapa em Tela Cheia",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Tela Cheia", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Botões de Rastreio Vivo (Em Movimento) e GPS Pulso (1x)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Button(
+                            onClick = {
+                                autoFollowUser = true
+                                viewModel.toggleLiveGpsTracking()
+                                mapCenterLat = state.currentLat
+                                mapCenterLon = state.currentLon
+                                if (mapZoomFloat < 16.0f) mapZoomFloat = 16.5f
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (state.isLiveTracking) Color(0xFF059669) else Color(0xFF1E293B),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1.2f)
+                                .testTag("btn_live_tracking_toggle")
+                        ) {
+                            Icon(
+                                if (state.isLiveTracking) Icons.Default.DirectionsRun else Icons.Default.LocationSearching,
+                                contentDescription = null,
+                                tint = if (state.isLiveTracking) Color.White else Color(0xFF34D399),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (state.isLiveTracking) "Rastreio Vivo: ON" else "Rastrear Movimento",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                autoFollowUser = true
+                                viewModel.triggerSingleShotGpsPulse()
+                                mapCenterLat = state.currentLat
+                                mapCenterLon = state.currentLon
+                                if (mapZoomFloat < 16.0f) mapZoomFloat = 16.5f
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF59E0B),
+                                contentColor = Color(0xFF090D16)
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_gps_pulse_map")
+                        ) {
+                            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "GPS Pulso (1x)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Barra de Telemetria de Movimentação (Velocidade, Rumo, Pontos da Trilha)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF090D16), RoundedCornerShape(8.dp))
+                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        TelemetryItem(
+                            label = "VELOCIDADE",
+                            value = String.format(Locale.US, "%.1f km/h", state.currentSpeedKmh),
+                            valueColor = Color(0xFF38BDF8)
+                        )
+                        TelemetryItem(
+                            label = "RUMO ATUAL",
+                            value = "${state.currentHeadingDegrees.toInt()}°",
+                            valueColor = Color(0xFFFBBF24)
+                        )
                         TelemetryItem(
                             label = "TRILHA GPS",
                             value = "${state.movementTrail.size} pts",
                             valueColor = Color(0xFF34D399)
                         )
-                    }
-                    TextButton(
-                        onClick = { viewModel.clearMovementTrail() },
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                        modifier = Modifier.height(24.dp)
-                    ) {
-                        Text("Limpar", fontSize = 10.sp, color = Color(0xFFF87171), fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-
-        // --- 2. VIEWPORT PRINCIPAL DO MAPA (OCUPA O ESPAÇO PRINCIPAL SEM CONFLITO DE SCROLL!) ---
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = Color(0xFF070B14)
-            ),
-            shape = RoundedCornerShape(14.dp),
-            border = androidx.compose.foundation.BorderStroke(
-                1.5.dp,
-                if (state.isLiveTracking) Color(0xFF10B981) else Color(0xFF0284C7)
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-        ) {
-            MapViewportBox(
-                context = context,
-                state = state,
-                mapCenterLat = mapCenterLat,
-                mapCenterLon = mapCenterLon,
-                mapZoomFloat = mapZoomFloat,
-                autoFollowUser = autoFollowUser,
-                showStreetTiles = showStreetTiles,
-                isFullscreen = false,
-                currentStreetAddress = currentStreetAddress,
-                focusedPoiEntity = focusedPoiEntity,
-                tileBitmapCache = tileBitmapCache,
-                tileDownloadScope = tileDownloadScope,
-                inFlightTiles = inFlightTiles,
-                cachedTilesCount = cachedTilesCount,
-                isPreloadingTiles = isPreloadingTiles,
-                preloadStatusText = preloadStatusText,
-                onUpdateCachedCount = { cachedTilesCount = countCachedTilesOnDisk(context) },
-                onTransformMap = { dLat, dLon, zoomFactor ->
-                    if (abs(dLat) > 1e-7 || abs(dLon) > 1e-7) {
-                        autoFollowUser = false
-                        mapCenterLat = (mapCenterLat + dLat).coerceIn(-85.0, 85.0)
-                        mapCenterLon = (mapCenterLon + dLon).coerceIn(-180.0, 180.0)
-                    }
-                    if (zoomFactor != 1.0f) {
-                        val deltaZ = (ln(zoomFactor.toDouble()) / ln(2.0)).toFloat()
-                        mapZoomFloat = (mapZoomFloat + deltaZ).coerceIn(10.0f, 19.3f)
-                    }
-                },
-                onZoomChange = { newZoom -> mapZoomFloat = newZoom.coerceIn(10.0f, 19.3f) },
-                onCenterUser = {
-                    autoFollowUser = true
-                    mapCenterLat = state.currentLat
-                    mapCenterLon = state.currentLon
-                    if (mapZoomFloat < 16.5f) mapZoomFloat = 17.0f
-                },
-                onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
-                onToggleFullscreen = { isMapFullscreen = true },
-                onPreloadTiles = {
-                    scope.launch {
-                        isPreloadingTiles = true
-                        preloadStatusText = "Baixando ruas detalhadas (Zoom 15 a 18)..."
-                        val downloaded = preloadRegionTiles(
-                            context = context,
-                            centerLat = mapCenterLat,
-                            centerLon = mapCenterLon,
-                            zoom = mapZoomInt,
-                            cache = tileBitmapCache
-                        )
-                        cachedTilesCount = countCachedTilesOnDisk(context)
-                        preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos de ruas salvos" else "✓ Ruas da região em cache"
-                        isPreloadingTiles = false
-                    }
-                }
-            )
-        }
-
-        // --- 3. BARRA INFERIOR RETRÁTIL DE PONTOS SEGUROS E ABRIGOS ---
-        Surface(
-            color = if (crisisMode) Color.Black else Color(0xFF111827),
-            shape = RoundedCornerShape(12.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { showPoiDrawerOnMainScreen = !showPoiDrawerOnMainScreen }
-                    ) {
-                        Icon(
-                            if (showPoiDrawerOnMainScreen) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
-                            contentDescription = null,
-                            tint = Color(0xFFFBBF24),
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Pontos Seguros e Abrigos (${navList.size})",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(
-                            onClick = onOpenAddPoiDialog,
+                            onClick = { viewModel.clearMovementTrail() },
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
                             modifier = Modifier.height(28.dp)
                         ) {
-                            Icon(Icons.Default.AddLocationAlt, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text("Novo Ponto", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
-                        }
-                        if (navList.isNotEmpty()) {
-                            TextButton(
-                                onClick = { showConfirmClearPois = true },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Icon(Icons.Default.DeleteSweep, contentDescription = "Limpar Pontos", tint = Color(0xFFF87171), modifier = Modifier.size(15.dp))
-                                Spacer(modifier = Modifier.width(2.dp))
-                                Text("Limpar", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
-                            }
+                            Text("Limpar Trilha", fontSize = 10.sp, color = Color(0xFFF87171), fontWeight = FontWeight.Bold)
                         }
                     }
-                }
 
-                if (showPoiDrawerOnMainScreen) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    if (navList.isEmpty()) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
+                    // Painel da Bússola apontando para o Abrigo/Hospital focado
+                    if (focusedPoi != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .background(Color(0xFF090D16), RoundedCornerShape(10.dp))
+                                .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(10.dp))
                                 .padding(10.dp)
                         ) {
-                            Text(
-                                text = "Nenhum Ponto de Encontro ou Apoio cadastrado.",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Button(
-                                onClick = onOpenAddPoiDialog,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFF59E0B),
-                                    contentColor = Color(0xFF090D16)
-                                )
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.size(54.dp)
                             ) {
-                                Icon(Icons.Default.AddLocationAlt, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Cadastrar Meu Ponto de Encontro", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                                Canvas(modifier = Modifier.size(54.dp)) {
+                                    drawCircle(
+                                        color = Color(0xFF334155),
+                                        style = Stroke(width = 2.dp.toPx())
+                                    )
+                                    drawLine(
+                                        color = Color(0xFFEF4444),
+                                        start = Offset(size.width / 2, 3.dp.toPx()),
+                                        end = Offset(size.width / 2, 10.dp.toPx()),
+                                        strokeWidth = 2.5.dp.toPx()
+                                    )
+                                }
+                                Icon(
+                                    Icons.Default.Navigation,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFBBF24),
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .rotate(focusedPoi.bearingDegrees.toFloat())
+                                )
                             }
-                        }
-                    } else {
-                        LazyColumn(
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 175.dp)
-                        ) {
-                            items(navList, key = { it.poiId }) { nav ->
-                                val isSelected = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
-                                PoiOfflineCard(
-                                    nav = nav,
-                                    isSelected = isSelected,
-                                    crisisMode = crisisMode,
-                                    onClick = {
-                                        selectedPoiId = nav.poiId
-                                        val targetPoi = state.pois.find { it.id == nav.poiId }
-                                        if (targetPoi != null) {
-                                            autoFollowUser = false
-                                            mapCenterLat = targetPoi.latitude
-                                            mapCenterLon = targetPoi.longitude
-                                            if (mapZoomFloat < 16.5f) mapZoomFloat = 17.0f
-                                        }
-                                    },
-                                    onDelete = { viewModel.deletePoi(nav.poiId) }
+
+                            Column(
+                                modifier = Modifier
+                                    .padding(start = 10.dp)
+                                    .weight(1f)
+                            ) {
+                                Text(
+                                    text = "DESTINO SELECIONADO:",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF94A3B8)
+                                )
+                                Text(
+                                    text = focusedPoi.poiTitle,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = Color.White
+                                )
+                                val walkMinutes = (focusedPoi.distanceMeters / 75.0).roundToInt().coerceAtLeast(1)
+                                Text(
+                                    text = "${focusedPoi.cardinalDetailed} • Azimute ${focusedPoi.bearingDegrees.toInt()}° (~$walkMinutes min a pé)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFFBBF24)
+                                )
+                            }
+
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    text = focusedPoi.distanceFormatted,
+                                    fontSize = 19.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color(0xFF38BDF8)
+                                )
+                                Text(
+                                    text = "Linha Direta",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFFCBD5E1)
                                 )
                             }
                         }
                     }
                 }
             }
+        }
+
+        // --- 2. MAPA INTERATIVO COM NOMES DE RUAS HD, PINÇA (ZOOM IN/OUT) E TELA CHEIA ---
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF070B14)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.5.dp,
+                    if (state.isLiveTracking) Color(0xFF10B981) else Color(0xFF0284C7)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(370.dp)
+            ) {
+                MapViewportBox(
+                    context = context,
+                    state = state,
+                    mapCenterLat = mapCenterLat,
+                    mapCenterLon = mapCenterLon,
+                    mapZoomFloat = mapZoomFloat,
+                    autoFollowUser = autoFollowUser,
+                    showStreetTiles = showStreetTiles,
+                    isFullscreen = false,
+                    currentStreetAddress = currentStreetAddress,
+                    focusedPoiEntity = focusedPoiEntity,
+                    tileBitmapCache = tileBitmapCache,
+                    tileDownloadScope = tileDownloadScope,
+                    inFlightTiles = inFlightTiles,
+                    cachedTilesCount = cachedTilesCount,
+                    isPreloadingTiles = isPreloadingTiles,
+                    preloadStatusText = preloadStatusText,
+                    onUpdateCachedCount = { cachedTilesCount = countCachedTilesOnDisk(context) },
+                    onTransformMap = { dLat, dLon, zoomFactor ->
+                        if (abs(dLat) > 1e-7 || abs(dLon) > 1e-7) {
+                            autoFollowUser = false
+                            mapCenterLat = (mapCenterLat + dLat).coerceIn(-85.0, 85.0)
+                            mapCenterLon = (mapCenterLon + dLon).coerceIn(-180.0, 180.0)
+                        }
+                        if (zoomFactor != 1.0f) {
+                            val deltaZ = (ln(zoomFactor.toDouble()) / ln(2.0)).toFloat()
+                            mapZoomFloat = (mapZoomFloat + deltaZ).coerceIn(10.0f, 19.2f)
+                        }
+                    },
+                    onZoomChange = { newZoom -> mapZoomFloat = newZoom.coerceIn(10.0f, 19.2f) },
+                    onCenterUser = {
+                        autoFollowUser = true
+                        mapCenterLat = state.currentLat
+                        mapCenterLon = state.currentLon
+                        if (mapZoomFloat < 16.5f) mapZoomFloat = 16.8f
+                    },
+                    onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
+                    onToggleFullscreen = { isMapFullscreen = true },
+                    onPreloadTiles = {
+                        scope.launch {
+                            isPreloadingTiles = true
+                            preloadStatusText = "Baixando ruas detalhadas..."
+                            val downloaded = preloadRegionTiles(
+                                context = context,
+                                centerLat = mapCenterLat,
+                                centerLon = mapCenterLon,
+                                zoom = mapZoomInt,
+                                cache = tileBitmapCache
+                            )
+                            cachedTilesCount = countCachedTilesOnDisk(context)
+                            preloadStatusText = if (downloaded > 0) "✓ +$downloaded blocos de ruas salvos" else "✓ Ruas da região em cache"
+                            isPreloadingTiles = false
+                        }
+                    }
+                )
+            }
+        }
+
+        // --- 3. CABEÇALHO DA LISTA DE PONTOS DE APOIO ---
+        item {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+            ) {
+                Text(
+                    text = "Pontos Seguros e Abrigos (${navList.size}):",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = onOpenAddPoiDialog,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Icon(Icons.Default.AddLocationAlt, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Novo Ponto", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBBF24))
+                    }
+                    if (navList.isNotEmpty()) {
+                        TextButton(
+                            onClick = { showConfirmClearPois = true },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Default.DeleteSweep, contentDescription = "Limpar Pontos", tint = Color(0xFFF87171), modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("Limpar", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- 4. LISTA DE PONTOS DE ENCONTRO E APOIO ---
+        if (navList.isEmpty()) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
+                    ) {
+                        Text(
+                            text = "Nenhum Ponto de Encontro ou Apoio cadastrado.",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = onOpenAddPoiDialog,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF59E0B),
+                                contentColor = Color(0xFF090D16)
+                            )
+                        ) {
+                            Icon(Icons.Default.AddLocationAlt, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Cadastrar Meu Ponto de Encontro", fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+                }
+            }
+        } else {
+            items(navList, key = { it.poiId }) { nav ->
+                val isSelected = nav.poiId == (selectedPoiId ?: navList.firstOrNull()?.poiId)
+                PoiOfflineCard(
+                    nav = nav,
+                    isSelected = isSelected,
+                    crisisMode = crisisMode,
+                    onClick = {
+                        selectedPoiId = nav.poiId
+                        val targetPoi = state.pois.find { it.id == nav.poiId }
+                        if (targetPoi != null) {
+                            autoFollowUser = false
+                            mapCenterLat = targetPoi.latitude
+                            mapCenterLon = targetPoi.longitude
+                            if (mapZoomFloat < 16.5f) mapZoomFloat = 16.8f
+                        }
+                    },
+                    onDelete = { viewModel.deletePoi(nav.poiId) }
+                )
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(76.dp))
         }
     }
 
@@ -626,10 +667,10 @@ fun OfflineMapScreen(
                             }
                             if (zoomFactor != 1.0f) {
                                 val deltaZ = (ln(zoomFactor.toDouble()) / ln(2.0)).toFloat()
-                                mapZoomFloat = (mapZoomFloat + deltaZ).coerceIn(10.0f, 19.3f)
+                                mapZoomFloat = (mapZoomFloat + deltaZ).coerceIn(10.0f, 19.2f)
                             }
                         },
-                        onZoomChange = { newZoom -> mapZoomFloat = newZoom.coerceIn(10.0f, 19.3f) },
+                        onZoomChange = { newZoom -> mapZoomFloat = newZoom.coerceIn(10.0f, 19.2f) },
                         onCenterUser = {
                             autoFollowUser = true
                             mapCenterLat = state.currentLat
@@ -641,7 +682,7 @@ fun OfflineMapScreen(
                         onPreloadTiles = {
                             scope.launch {
                                 isPreloadingTiles = true
-                                preloadStatusText = "Baixando ruas detalhadas (Zoom 15 a 18)..."
+                                preloadStatusText = "Baixando ruas detalhadas..."
                                 val downloaded = preloadRegionTiles(
                                     context = context,
                                     centerLat = mapCenterLat,
@@ -656,7 +697,7 @@ fun OfflineMapScreen(
                         }
                     )
 
-                    // HUD Tático Superior em Tela Cheia (Rua Atual + Bússola + Velocidade + Botão Fechar)
+                    // HUD Tático Superior em Tela Cheia (Bússola + Rua Atual + Velocidade + Botão Fechar)
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = Color(0xFF090D16).copy(alpha = 0.92f)
@@ -684,7 +725,7 @@ fun OfflineMapScreen(
                                             contentDescription = null,
                                             tint = Color(0xFFFBBF24),
                                             modifier = Modifier
-                                                .size(22.dp)
+                                                .size(24.dp)
                                                 .rotate(focusedPoi.bearingDegrees.toFloat())
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
@@ -700,7 +741,7 @@ fun OfflineMapScreen(
                                         )
                                         Text(
                                             text = if (focusedPoi != null) {
-                                                "${focusedPoi.poiTitle} (${focusedPoi.distanceFormatted}) • Zoom ${String.format(Locale.US, "%.1f", mapZoomFloat)}x • ${String.format(Locale.US, "%.1f km/h", state.currentSpeedKmh)}"
+                                                "${focusedPoi.poiTitle} • ${focusedPoi.distanceFormatted} • Zoom ${String.format(Locale.US, "%.1f", mapZoomFloat)}x"
                                             } else {
                                                 "Zoom ${String.format(Locale.US, "%.1f", mapZoomFloat)}x • Vel: ${String.format(Locale.US, "%.1f km/h", state.currentSpeedKmh)}"
                                             },
@@ -805,12 +846,12 @@ fun OfflineMapScreen(
                                         Icons.Default.GpsFixed,
                                         contentDescription = null,
                                         tint = if (autoFollowUser) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                                        modifier = Modifier.size(13.dp)
+                                        modifier = Modifier.size(14.dp)
                                     )
-                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
                                     Text(
                                         text = if (autoFollowUser) "Seguindo" else "Livre",
-                                        fontSize = 10.sp,
+                                        fontSize = 11.sp,
                                         color = Color.White
                                     )
                                 }
@@ -919,13 +960,13 @@ private fun TelemetryItem(
     Column(horizontalAlignment = Alignment.Start) {
         Text(
             text = label,
-            fontSize = 8.sp,
+            fontSize = 9.sp,
             fontWeight = FontWeight.Bold,
             color = Color(0xFF94A3B8)
         )
         Text(
             text = value,
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             fontWeight = FontWeight.ExtraBold,
             color = valueColor
         )
@@ -1064,12 +1105,12 @@ private fun MapViewportBox(
         ) {
             SmallFloatingButton(
                 icon = Icons.Default.Add,
-                contentDescription = "Mais Zoom (Aproximar Rua)",
+                contentDescription = "Mais Zoom",
                 onClick = { onZoomChange(mapZoomFloat + 0.85f) }
             )
             SmallFloatingButton(
                 icon = Icons.Default.Remove,
-                contentDescription = "Menos Zoom (Afastar Mapa)",
+                contentDescription = "Menos Zoom",
                 onClick = { onZoomChange(mapZoomFloat - 0.85f) }
             )
             SmallFloatingButton(
@@ -1113,7 +1154,7 @@ private fun MapViewportBox(
                     .padding(horizontal = 8.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = preloadStatusText ?: "Arraste com 1 dedo • Pinça (2 dedos) ou + / - para Zoom",
+                    text = preloadStatusText ?: "Pinça (2 dedos), arraste ou + / - para Zoom nas ruas",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White,
@@ -1143,15 +1184,15 @@ private fun SmallFloatingButton(
     onClick: () -> Unit
 ) {
     Surface(
-        color = Color(0xFF090D16).copy(alpha = 0.92f),
+        color = Color(0xFF090D16).copy(alpha = 0.90f),
         shape = RoundedCornerShape(10.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF475569)),
         modifier = Modifier
-            .size(42.dp)
+            .size(40.dp)
             .clickable(onClick = onClick)
     ) {
         Box(contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(22.dp))
+            Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(21.dp))
         }
     }
 }
@@ -1169,11 +1210,6 @@ private fun LegendDot(color: Color, label: String) {
     }
 }
 
-/**
- * Renderizador Cartográfico Web Mercator com Escala DPI Ampliada (300.dp por tile),
- * Fallback Hierárquico (Parent/Child Tile Scaling) para Zoom In/Out Instantâneo,
- * e Carregamento Assíncrono Não-Cancelável.
- */
 @Composable
 private fun InteractiveOfflineMapCanvas(
     context: Context,
@@ -1210,7 +1246,7 @@ private fun InteractiveOfflineMapCanvas(
     val currentCenterTileX = ((centerLon + 180.0) / 360.0 * n).toInt()
     val currentCenterTileY = ((1.0 - ln(tan(centerLatRad) + 1.0 / cos(centerLatRad)) / PI) / 2.0 * n).toInt()
 
-    // Dispara carregamento em background (em escopo persistente não-cancelável) apenas quando o bloco central ou zoom mudam!
+    // Dispara carregamento assíncrono em escopo não-cancelável apenas quando a grade de tiles muda
     LaunchedEffect(currentCenterTileX, currentCenterTileY, tileZoom, showStreetTiles) {
         if (!showStreetTiles) return@LaunchedEffect
         val maxTile = n.toInt() - 1
@@ -1233,7 +1269,7 @@ private fun InteractiveOfflineMapCanvas(
             }
         }
 
-        // 1º: Anel central prioritário 3x3 (aparece imediatamente na tela)
+        // 1º: Anel central 3x3 (prioridade máxima)
         for (dx in -1..1) {
             for (dy in -1..1) {
                 val tx = (currentCenterTileX + dx).coerceIn(0, maxTile)
@@ -1242,7 +1278,7 @@ private fun InteractiveOfflineMapCanvas(
             }
         }
 
-        // 2º: Tile pai (zoom - 1) para garantir fallback imediato ao dar zoom out ou zoom in
+        // 2º: Tiles pais (zoom - 1) para fallback instantâneo durante zoom in/out
         if (tileZoom > 10) {
             val parentZ = tileZoom - 1
             val parentMax = (1 shl parentZ) - 1
@@ -1255,7 +1291,7 @@ private fun InteractiveOfflineMapCanvas(
             }
         }
 
-        // 3º: Anel externo 5x5 para pré-carregar vizinhança durante o movimento
+        // 3º: Anel externo 5x5 para pré-carregar as ruas vizinhas
         for (dx in -2..2) {
             for (dy in -2..2) {
                 if (abs(dx) == 2 || abs(dy) == 2) {
@@ -1267,7 +1303,6 @@ private fun InteractiveOfflineMapCanvas(
         }
     }
 
-    // Vetores Geográficos Offline de Referência + Nomes de Ruas e Avenidas
     val lagoaPolygon = remember {
         listOf(
             -22.9630 to -43.2170,
@@ -1412,7 +1447,7 @@ private fun InteractiveOfflineMapCanvas(
     Canvas(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (crisisMode) Color.Black else Color(0xFF0A1220))
+            .background(if (crisisMode) Color.Black else Color(0xFF08101E))
             // Duplo-toque para dar zoom rápido na rua
             .pointerInput(Unit) {
                 detectTapGestures(
@@ -1421,24 +1456,33 @@ private fun InteractiveOfflineMapCanvas(
                     }
                 )
             }
-            // Pinça com 2 dedos (Zoom contínuo) + Arrastar com 1 ou 2 dedos (Pan em todas as direções)
+            // Gestor customizado que consome 100% dos eventos de toque no mapa (impede o LazyColumn de roubar o arraste vertical ou a pinça!)
             .pointerInput(Unit) {
-                val baseTilePx = 300.dp.toPx().toDouble()
-                detectTransformGestures(panZoomLock = false) { _, pan, zoomChange, _ ->
-                    val worldScale = 2.0.pow(currentZoomFloat.toDouble()) * baseTilePx
-                    val dLon = -(pan.x / worldScale) * 360.0
-                    val dLat = (pan.y / worldScale) * 360.0 * cos(Math.toRadians(currentCenterLat.coerceIn(-80.0, 80.0)))
-                    val safeZoom = zoomChange.coerceIn(0.65f, 1.55f)
-                    onTransformGesture(dLat, dLon, safeZoom)
+                val baseTilePx = 280.dp.toPx().toDouble()
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val zoomChange = event.calculateZoom()
+                        val pan = event.calculatePan()
+                        if (zoomChange != 1f || pan != Offset.Zero) {
+                            val worldScale = 2.0.pow(currentZoomFloat.toDouble()) * baseTilePx
+                            val dLon = -(pan.x / worldScale) * 360.0
+                            val dLat = (pan.y / worldScale) * 360.0 * cos(Math.toRadians(currentCenterLat.coerceIn(-80.0, 80.0)))
+                            val safeZoom = zoomChange.coerceIn(0.65f, 1.55f)
+                            onTransformGesture(dLat, dLon, safeZoom)
+                            event.changes.forEach { it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
                 }
             }
     ) {
         val w = size.width
         val h = size.height
 
-        // Tamanho físico ampliado do tile na tela do celular (300.dp escalado pelo zoom fracionário):
-        // Garante que os nomes das ruas fiquem grandes, nítidos e fáceis de ler no Galaxy S25 FE!
-        val tileSizePx = 300.dp.toPx() * subTileScale
+        // Tamanho físico real do tile na tela do celular (280.dp escalado pelo zoom fracionário):
+        // Garante que os nomes das ruas fiquem grandes e nítidos em telas FullHD/QHD!
+        val tileSizePx = 280.dp.toPx() * subTileScale
 
         fun latLonToWorldPx(lat: Double, lon: Double): Pair<Double, Double> {
             val clampedLat = lat.coerceIn(-85.0511, 85.0511)
@@ -1472,18 +1516,18 @@ private fun InteractiveOfflineMapCanvas(
                         val tileScreenY = (ty * tileSizePx - centerWorldY + h / 2.0).roundToInt()
                         val dstSizePx = IntSize(tileSizePx.roundToInt() + 2, tileSizePx.roundToInt() + 2)
 
-                        val exactKey = "$tileZoom/$tx/$ty"
-                        val exactBmp = tileBitmapCache[exactKey]
-                        if (exactBmp != null) {
+                        val key = "$tileZoom/$tx/$ty"
+                        val bmp = tileBitmapCache[key]
+                        if (bmp != null) {
                             drawImage(
-                                image = exactBmp,
+                                image = bmp,
                                 dstOffset = IntOffset(tileScreenX, tileScreenY),
                                 dstSize = dstSizePx,
-                                alpha = if (crisisMode) 0.72f else 0.98f,
+                                alpha = if (crisisMode) 0.70f else 0.98f,
                                 filterQuality = FilterQuality.High
                             )
                         } else {
-                            // Fallback 1: procura um tile Pai (zoom menor já em memória) e recorta o sub-quadrante exato!
+                            // Fallback 1: procura tile Pai (zoom menor já em memória) e recorta o sub-quadrante exato
                             var drawnFallback = false
                             for (deltaZ in 1..5) {
                                 val parentZ = tileZoom - deltaZ
@@ -1503,7 +1547,7 @@ private fun InteractiveOfflineMapCanvas(
                                         srcSize = IntSize(srcW, srcH),
                                         dstOffset = IntOffset(tileScreenX, tileScreenY),
                                         dstSize = dstSizePx,
-                                        alpha = if (crisisMode) 0.68f else 0.94f,
+                                        alpha = if (crisisMode) 0.65f else 0.94f,
                                         filterQuality = FilterQuality.Medium
                                     )
                                     drawnFallback = true
@@ -1511,7 +1555,7 @@ private fun InteractiveOfflineMapCanvas(
                                 }
                             }
 
-                            // Fallback 2: ao dar Zoom Out, desenha os 4 tiles Filhos (zoom + 1) caso já estejam em memória
+                            // Fallback 2: procura tiles Filhos (zoom + 1) ao dar Zoom Out
                             if (!drawnFallback && tileZoom < 19) {
                                 val childZ = tileZoom + 1
                                 val halfSize = (tileSizePx / 2.0).roundToInt() + 2
@@ -1526,7 +1570,7 @@ private fun InteractiveOfflineMapCanvas(
                                                     tileScreenY + (cy * tileSizePx / 2.0).roundToInt()
                                                 ),
                                                 dstSize = IntSize(halfSize, halfSize),
-                                                alpha = if (crisisMode) 0.70f else 0.96f,
+                                                alpha = if (crisisMode) 0.68f else 0.96f,
                                                 filterQuality = FilterQuality.Medium
                                             )
                                         }
@@ -1540,7 +1584,7 @@ private fun InteractiveOfflineMapCanvas(
         }
 
         // 2. Grade Cartográfica Tática Discreta
-        val gridStep = 80.dp.toPx()
+        val gridStep = 72.dp.toPx()
         var gx = (w / 2f) % gridStep
         while (gx < w) {
             drawLine(
@@ -1562,7 +1606,7 @@ private fun InteractiveOfflineMapCanvas(
             gy += gridStep
         }
 
-        // 3. Cartografia Vetorial Offline de Referência
+        // 3. Cartografia Vetorial Offline do Rio de Janeiro (Lagoa Rodrigo de Freitas + Orla)
         val lagoaPath = Path().apply {
             lagoaPolygon.forEachIndexed { idx, (lat, lon) ->
                 val pt = toScreen(lat, lon)
@@ -1572,11 +1616,11 @@ private fun InteractiveOfflineMapCanvas(
         }
         drawPath(
             path = lagoaPath,
-            color = Color(0xFF0284C7).copy(alpha = if (showStreetTiles) 0.14f else 0.35f)
+            color = Color(0xFF0284C7).copy(alpha = if (showStreetTiles) 0.16f else 0.35f)
         )
         drawPath(
             path = lagoaPath,
-            color = Color(0xFF38BDF8).copy(alpha = 0.50f),
+            color = Color(0xFF38BDF8).copy(alpha = 0.55f),
             style = Stroke(width = 1.5.dp.toPx())
         )
 
@@ -1594,12 +1638,12 @@ private fun InteractiveOfflineMapCanvas(
 
         // Vias e Nomes das Ruas Vetoriais (Sempre disponíveis, mesmo 100% sem cache de tile)
         val roadLabelPaint = Paint().apply {
-            color = android.graphics.Color.argb(250, 254, 240, 138)
-            textSize = 12.sp.toPx()
+            color = android.graphics.Color.argb(245, 254, 240, 138)
+            textSize = 11.5.sp.toPx()
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
             isAntiAlias = true
-            setShadowLayer(7f, 0f, 1f, android.graphics.Color.BLACK)
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
         }
 
         namedRoads.forEach { road ->
@@ -1612,8 +1656,8 @@ private fun InteractiveOfflineMapCanvas(
             if (!showStreetTiles) {
                 drawPath(
                     path = roadPath,
-                    color = Color(0xFF64748B).copy(alpha = 0.78f),
-                    style = Stroke(width = 3.2.dp.toPx(), cap = StrokeCap.Round)
+                    color = Color(0xFF64748B).copy(alpha = 0.75f),
+                    style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
                 )
             }
             if (zoomFloat >= 13.5f || !showStreetTiles) {
@@ -1626,12 +1670,12 @@ private fun InteractiveOfflineMapCanvas(
 
         // Rótulos de Bairros
         val neighborhoodPaint = Paint().apply {
-            color = android.graphics.Color.argb(225, 241, 245, 249)
+            color = android.graphics.Color.argb(220, 241, 245, 249)
             textSize = if (zoomFloat >= 15f) 12.sp.toPx() else 10.sp.toPx()
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
             isAntiAlias = true
-            setShadowLayer(7f, 0f, 1f, android.graphics.Color.BLACK)
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
         }
         neighborhoods.forEach { (name, lat, lon) ->
             val pt = toScreen(lat, lon)
@@ -1688,7 +1732,7 @@ private fun InteractiveOfflineMapCanvas(
             textSize = 12.sp.toPx()
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             isAntiAlias = true
-            setShadowLayer(7f, 0f, 1f, android.graphics.Color.BLACK)
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
         }
 
         pois.forEach { poi ->
@@ -1719,7 +1763,7 @@ private fun InteractiveOfflineMapCanvas(
                     center = pt
                 )
 
-                val shortLabel = poi.title.substringBefore(" -").take(24)
+                val shortLabel = poi.title.substringBefore(" -").take(22)
                 drawContext.canvas.nativeCanvas.drawText(
                     shortLabel,
                     pt.x + 12.dp.toPx(),
@@ -1729,7 +1773,7 @@ private fun InteractiveOfflineMapCanvas(
             }
         }
 
-        // 7. Pino da Posição Atual do Usuário + Cone de Direção de Movimento + Rótulo da Rua Atual
+        // 7. Pino da Posição Atual do Usuário + Cone de Direção de Movimento + Nome da Rua Atual
         if (userScreen.x in -60f..(w + 60f) && userScreen.y in -60f..(h + 60f)) {
             drawCircle(
                 color = if (isLiveTracking) Color(0xFF10B981).copy(alpha = 0.30f) else Color(0xFF0284C7).copy(alpha = 0.30f),
@@ -1766,16 +1810,15 @@ private fun InteractiveOfflineMapCanvas(
 
             drawCircle(
                 color = Color.White,
-                radius = 9.dp.toPx(),
+                radius = 8.5.dp.toPx(),
                 center = userScreen
             )
             drawCircle(
                 color = if (isLiveTracking) Color(0xFF10B981) else Color(0xFF0284C7),
-                radius = 6.5.dp.toPx(),
+                radius = 6.dp.toPx(),
                 center = userScreen
             )
 
-            // Rótulo flutuante com o nome da rua atual junto ao pino do usuário
             val userStreetPaint = Paint().apply {
                 color = android.graphics.Color.argb(255, 167, 243, 208)
                 textSize = 11.5.sp.toPx()
@@ -1784,11 +1827,10 @@ private fun InteractiveOfflineMapCanvas(
                 isAntiAlias = true
                 setShadowLayer(8f, 0f, 1.5f, android.graphics.Color.BLACK)
             }
-            val shortStreet = currentStreetAddress.take(34)
             drawContext.canvas.nativeCanvas.drawText(
-                shortStreet,
+                currentStreetAddress.take(34),
                 userScreen.x,
-                userScreen.y - 16.dp.toPx(),
+                userScreen.y - 15.dp.toPx(),
                 userStreetPaint
             )
         }
@@ -1796,8 +1838,31 @@ private fun InteractiveOfflineMapCanvas(
 }
 
 /**
- * Carrega um tile 256x256 do cache offline no disco (filesDir/osm_tiles) ou faz o download
- * a partir de múltiplos servidores espelho (OSM a/b/c + Carto Voyager fallback) e grava em disco.
+ * Remove a pasta legada `osm_tiles` que continha tiles "403 Access blocked" (6725 bytes)
+ * e qualquer arquivo corrompido na pasta nova.
+ */
+private fun purgePoisonedLegacyTiles(context: Context) {
+    try {
+        val legacyDir = File(context.filesDir, "osm_tiles")
+        if (legacyDir.exists()) {
+            legacyDir.deleteRecursively()
+        }
+        val currentDir = File(context.filesDir, TILE_CACHE_DIR_NAME)
+        if (currentDir.exists()) {
+            currentDir.walkTopDown().forEach { f ->
+                if (f.isFile && (f.length() == 6725L || f.length() == 6672L || f.length() == 2049L || f.length() < 500L)) {
+                    f.delete()
+                }
+            }
+        }
+    } catch (_: Exception) {
+    }
+}
+
+/**
+ * Carrega um tile 256x256 do cache offline validado (`osm_tiles_v3`) ou faz o download
+ * a partir do servidor oficial OpenStreetMap (validando `x-blocked == null`) com fallback
+ * automático para o servidor ArcGIS World Street Map (`$zoom/$y/$x`).
  */
 private fun loadOrDownloadTile(
     context: Context,
@@ -1806,37 +1871,33 @@ private fun loadOrDownloadTile(
     y: Int
 ): ImageBitmap? {
     return try {
-        val tileFile = File(context.filesDir, "osm_tiles/$zoom/$x/$y.png")
-        if (tileFile.exists() && tileFile.length() > 100) {
+        val tileFile = File(context.filesDir, "$TILE_CACHE_DIR_NAME/$zoom/$x/$y.png")
+        if (tileFile.exists() && tileFile.length() > 800L && tileFile.length() != 6725L && tileFile.length() != 6672L && tileFile.length() != 2049L) {
             val bmp = BitmapFactory.decodeFile(tileFile.absolutePath)
             if (bmp != null) return bmp.asImageBitmap()
         }
 
         tileFile.parentFile?.mkdirs()
-        val mirrorIndex = abs(x + y) % 3
-        val sub = when (mirrorIndex) {
-            0 -> "a"
-            1 -> "b"
-            else -> "c"
-        }
+
+        // Nota: no ArcGIS World_Street_Map a ordem da URL é /tile/{z}/{y}/{x}
         val candidateUrls = listOf(
-            "https://$sub.tile.openstreetmap.org/$zoom/$x/$y.png",
             "https://tile.openstreetmap.org/$zoom/$x/$y.png",
-            "https://a.basemaps.cartocdn.com/rastertiles/voyager/$zoom/$x/$y.png"
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/$zoom/$y/$x"
         )
 
         for (urlStr in candidateUrls) {
             try {
                 val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 3500
-                    readTimeout = 3500
-                    setRequestProperty("User-Agent", "ResilienceHub-CivilPreparedness/2.0 (Android; OfflineMapCache)")
-                    setRequestProperty("Accept", "image/png,image/*;q=0.8")
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    setRequestProperty("User-Agent", VALID_TILE_USER_AGENT)
+                    setRequestProperty("Accept", "image/png,image/jpeg,image/*;q=0.8")
                 }
 
-                if (conn.responseCode == 200) {
+                val blockedHeader = conn.getHeaderField("x-blocked")
+                if (conn.responseCode == 200 && blockedHeader == null) {
                     val bytes = conn.inputStream.use { it.readBytes() }
-                    if (bytes.size > 100) {
+                    if (bytes.size > 800 && bytes.size != 6725 && bytes.size != 6672 && bytes.size != 2049) {
                         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                         if (bmp != null) {
                             FileOutputStream(tileFile).use { it.write(bytes) }
@@ -1845,7 +1906,7 @@ private fun loadOrDownloadTile(
                     }
                 }
             } catch (_: Exception) {
-                // Tenta o próximo espelho se houver falha de rede momentânea
+                // Tenta o próximo servidor em caso de falha momentânea
             }
         }
         null
@@ -1854,13 +1915,6 @@ private fun loadOrDownloadTile(
     }
 }
 
-/**
- * Resolve o nome da rua/avenida atual usando:
- * 1. Cache offline em disco (filesDir/street_names_cache.json)
- * 2. Android Geocoder nativo do aparelho (Samsung / Google Play Services)
- * 3. Nominatim Reverse Geocoding (quando online)
- * 4. Vetores locais de referência (fallback 100% offline sem cache prévio)
- */
 private suspend fun resolveStreetNameOfflineOrOnline(
     context: Context,
     lat: Double,
@@ -1869,7 +1923,6 @@ private suspend fun resolveStreetNameOfflineOrOnline(
     val gridKey = String.format(Locale.US, "%.4f,%.4f", lat, lon)
     val cacheFile = File(context.filesDir, "street_names_cache.json")
 
-    // 1. Verifica cache em disco
     val cachedJson = try {
         if (cacheFile.exists()) JSONObject(cacheFile.readText()) else JSONObject()
     } catch (_: Exception) {
@@ -1885,7 +1938,6 @@ private suspend fun resolveStreetNameOfflineOrOnline(
         } catch (_: Exception) {}
     }
 
-    // 2. Tenta Android Geocoder nativo
     try {
         if (Geocoder.isPresent()) {
             val geocoder = Geocoder(context, Locale("pt", "BR"))
@@ -1910,13 +1962,12 @@ private suspend fun resolveStreetNameOfflineOrOnline(
         }
     } catch (_: Exception) {}
 
-    // 3. Tenta Nominatim Reverse Geocoding rápido se houver sinal
     try {
         val url = URL("https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=$lat&lon=$lon&zoom=18&accept-language=pt-BR")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 2500
             readTimeout = 2500
-            setRequestProperty("User-Agent", "ResilienceHub-CivilPreparedness/2.0")
+            setRequestProperty("User-Agent", VALID_TILE_USER_AGENT)
         }
         if (conn.responseCode == 200) {
             val body = conn.inputStream.bufferedReader().use { it.readText() }
@@ -1944,8 +1995,7 @@ private suspend fun resolveStreetNameOfflineOrOnline(
         }
     } catch (_: Exception) {}
 
-    // 4. Fallback vetorial offline
-    String.format(Locale.US, "Coord %.4f, %.4f (Offline)", lat, lon)
+    String.format(Locale.US, "Coord %.4f, %.4f", lat, lon)
 }
 
 private suspend fun preloadRegionTiles(
@@ -1984,9 +2034,9 @@ private suspend fun preloadRegionTiles(
 }
 
 private fun countCachedTilesOnDisk(context: Context): Int {
-    val root = File(context.filesDir, "osm_tiles")
+    val root = File(context.filesDir, TILE_CACHE_DIR_NAME)
     if (!root.exists()) return 0
-    return root.walkTopDown().count { it.isFile && it.extension == "png" }
+    return root.walkTopDown().count { it.isFile && it.extension == "png" && it.length() > 800L }
 }
 
 @Composable
