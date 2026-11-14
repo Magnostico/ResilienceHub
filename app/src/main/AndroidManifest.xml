@@ -26,6 +26,7 @@
 
     <application
         android:allowBackup="true"
+        android:largeHeap="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -45,7 +46,10 @@
             </intent-filter>
         </activity>
 
-        <!-- Bibliotecas nativas OpenCL/GPU necessárias para inferência fluida do MediaPipe LLM (Google AI Edge) -->
+        <!-- Bibliotecas nativas OpenCL/GPU/NPU usadas pelo LiteRT-LM (Google AI Edge Gallery) -->
+        <uses-native-library
+            android:name="libvndksupport.so"
+            android:required="false" />
         <uses-native-library
             android:name="libOpenCL.so"
             android:required="false" />
@@ -56,7 +60,16 @@
             android:name="libOpenCL-pixel.so"
             android:required="false" />
         <uses-native-library
-            android:name="libvndksupport.so"
+            android:name="libcdsprpc.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libedgetpu_litert.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libedgetpu_util.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libedgetpu_client.google.so"
             android:required="false" />
     </application>
 

@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.ChatMessage
@@ -108,7 +109,12 @@ fun ManualsAiScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 6.dp)
+                    ) {
                         Icon(
                             Icons.Default.AutoAwesome,
                             contentDescription = null,
@@ -121,12 +127,20 @@ fun ManualsAiScreen(
                                 text = if (showChatView) "IA ResilienceHub (RAG + Tema Livre)" else "Base RAG (${state.manualChunks.size} diretrizes)",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = Color.White
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "Conhecimento oficial do RAG + Modelo livre para qualquer assunto",
+                                text = if (state.isModelLoaded) {
+                                    "✓ Modelo Ativo: ${state.loadedModelName ?: "gemma-4-E2B-it.task"} + RAG"
+                                } else {
+                                    "Selecione o arquivo .task para inferência neural livre + RAG"
+                                },
                                 fontSize = 10.sp,
-                                color = Color(0xFF94A3B8)
+                                color = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFFBBF24),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -165,21 +179,84 @@ fun ManualsAiScreen(
 
                         OutlinedButton(
                             onClick = { showEdgeModelDialog = true },
-                            border = BorderStroke(1.dp, Color(0xFFA855F7)),
+                            border = BorderStroke(
+                                1.dp,
+                                if (state.isModelLoaded) Color(0xFF10B981) else Color(0xFFA855F7)
+                            ),
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             modifier = Modifier
-                                .height(28.dp)
+                                .height(30.dp)
                                 .testTag("btn_import_model")
                         ) {
                             Icon(
-                                Icons.Default.Memory,
+                                if (state.isModelLoaded) Icons.Default.CheckCircle else Icons.Default.FolderOpen,
                                 contentDescription = null,
-                                tint = Color(0xFFC084FC),
-                                modifier = Modifier.size(13.dp)
+                                tint = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFC084FC),
+                                modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(".task", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFC084FC))
+                            Text(
+                                text = if (state.isModelLoaded) "Modelo ✓" else "Modelo .task",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFC084FC)
+                            )
+                        }
+                    }
+                }
+
+                // Barra de ação direta para selecionar/carregar o arquivo .task quando ainda não carregado na memória
+                if (!state.isModelLoaded && !state.isModelInitializing) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        color = Color(0xFF1A1033),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, Color(0xFFA855F7)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "📂 Carregue seu arquivo gemma-4-E2B-it.task:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE9D5FF),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            if (state.hasSavedModelOnDisk) {
+                                Button(
+                                    onClick = { viewModel.loadSavedModelFromDisk() },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF10B981),
+                                        contentColor = Color(0xFF052E16)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("⚡ Ativar Salvo", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                            }
+                            Button(
+                                onClick = { modelPickerLauncher.launch("*/*") },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFA855F7),
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(13.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Selecionar .task", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+                            }
                         }
                     }
                 }
@@ -192,13 +269,25 @@ fun ManualsAiScreen(
                         border = BorderStroke(1.dp, Color(0xFF38BDF8)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = status,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color.White,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(8.dp)
-                        )
+                        ) {
+                            if (state.isModelInitializing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(15.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color(0xFF38BDF8)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                            Text(
+                                text = status,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White
+                            )
+                        }
                     }
                 }
             }
@@ -518,12 +607,69 @@ fun ManualsAiScreen(
                     }
 
                     Text(
-                        text = "• O app já conta com um Motor Cognitivo & Enciclopédico 100% Offline nativo embutido para responder tanto no Modo RAG quanto no Modo Chat Livre sem precisar de internet.\n" +
-                            "• Se você tiver um arquivo de modelo do Google AI Edge Gallery (.task, .litertlm ou .bin, como Gemma-2B-IT ou Gemma-3-1B) no celular, pode carregá-lo abaixo para inferência neural direta via MediaPipe!",
+                        text = "• Selecione abaixo o seu arquivo de modelo do Google AI Edge Gallery (ex: gemma-4-E2B-it.task ou .litertlm) salvo no celular.\n" +
+                            "• O app inicializará os pesos neurais via LiteRT-LM (GPU/CPU) mantendo todo o conhecimento do RAG Oficial de Sobrevivência + resposta livre para qualquer assunto!",
                         fontSize = 12.sp,
                         lineHeight = 17.sp,
                         color = Color(0xFFCBD5E1)
                     )
+
+                    val currentPrefBackend = viewModel.getPreferredBackend()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Acelerador:",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        listOf("GPU", "CPU").forEach { backendOpt ->
+                            val selected = currentPrefBackend.equals(backendOpt, ignoreCase = true)
+                            OutlinedButton(
+                                onClick = {
+                                    showEdgeModelDialog = false
+                                    viewModel.switchModelBackend(backendOpt)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selected) Color(0xFF34D399) else Color(0xFF475569)
+                                ),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (selected) Color(0xFF064E3B) else Color(0xFF090D16)
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text(
+                                    text = if (selected) "✓ $backendOpt" else backendOpt,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (selected) Color(0xFF34D399) else Color(0xFFCBD5E1)
+                                )
+                            }
+                        }
+                    }
+
+                    if (state.hasSavedModelOnDisk && !state.isModelLoaded) {
+                        Button(
+                            onClick = {
+                                showEdgeModelDialog = false
+                                viewModel.loadSavedModelFromDisk()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF10B981),
+                                contentColor = Color(0xFF052E16)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Carregar Modelo Salvo na Memória", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                        }
+                    }
 
                     Button(
                         onClick = {
@@ -538,7 +684,7 @@ fun ManualsAiScreen(
                     ) {
                         Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(17.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Importar Arquivo .task / .litertlm / .bin", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                        Text("Selecionar Arquivo .task / .litertlm", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
                     }
                 }
             },

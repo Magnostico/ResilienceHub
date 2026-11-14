@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
   alias(libs.plugins.android.application)
@@ -63,10 +64,22 @@ android {
     compose = true
     buildConfig = true
   }
+  packaging {
+    jniLibs {
+      pickFirsts.add("**/liblitertlm_jni.so")
+    }
+  }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
+  }
+}
+
+kotlin {
+  compilerOptions {
+    jvmTarget.set(JvmTarget.JVM_11)
+    freeCompilerArgs.addAll("-Xskip-metadata-version-check")
   }
 }
 
@@ -107,6 +120,7 @@ dependencies {
   implementation(libs.androidx.camera.core)
   implementation(libs.mlkit.barcode.scanning)
   implementation(libs.mediapipe.tasks.genai)
+  implementation(libs.litertlm.android)
   implementation(libs.pdfbox.android)
   implementation(libs.play.services.location)
   implementation(libs.kotlinx.coroutines.android)
@@ -125,4 +139,9 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
+  "ksp"("org.jetbrains.kotlin:kotlin-metadata-jvm:2.4.0")
+}
+
+configurations.all {
+  resolutionStrategy.force("org.jetbrains.kotlin:kotlin-metadata-jvm:2.4.0")
 }

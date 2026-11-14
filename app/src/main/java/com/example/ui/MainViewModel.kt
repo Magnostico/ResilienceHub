@@ -109,6 +109,10 @@ data class MainUiState(
     val isRagLoading: Boolean = false,
     val ragModeAi: Boolean = true,
     val pdfImportStatus: String? = null,
+    val isModelLoaded: Boolean = false,
+    val isModelInitializing: Boolean = false,
+    val loadedModelName: String? = null,
+    val hasSavedModelOnDisk: Boolean = false,
 
     // Backup & Restore states
     val availableBackups: List<BackupManager.BackupSnapshotInfo> = emptyList(),
@@ -183,6 +187,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isRagLoading = MutableStateFlow(false)
     private val _ragModeAi = MutableStateFlow(true)
     private val _pdfImportStatus = MutableStateFlow<String?>(null)
+    private val _isModelLoaded = MutableStateFlow(false)
+    private val _isModelInitializing = MutableStateFlow(false)
+    private val _loadedModelName = MutableStateFlow<String?>(null)
+    private val _hasSavedModelOnDisk = MutableStateFlow(false)
     private var pendingFreeTopicQuestion: String? = null
     private var lastAnsweredTopicQuery: String? = null
     private var lastAnsweredWasFreeTopic: Boolean = false
@@ -205,6 +213,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.ensureOfficialKnowledgeBaseSeeded()
             _familyDocuments.value = loadFamilyDocumentsFromDisk()
+            val existingModelFile = pdfRagManager.findLocalModelFile()
+            _hasSavedModelOnDisk.value = existingModelFile != null
+            if (existingModelFile != null) {
+                loadSavedModelFromDisk()
+            }
             refreshAvailableBackups()
             if (_availableBackups.value.isEmpty()) {
                 // Gera o primeiro snapshot automático sem bloquear a inicialização
@@ -360,7 +373,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _familyDocuments,
             _availableBackups,
             _backupStatusMessage,
-            _isBackupBusy
+            _isBackupBusy,
+            _isModelLoaded,
+            _isModelInitializing,
+            _loadedModelName,
+            _hasSavedModelOnDisk
         )
     ) { flowsArray: Array<Any?> ->
         @Suppress("UNCHECKED_CAST")
@@ -402,6 +419,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val availableBackups = flowsArray[27] as List<BackupManager.BackupSnapshotInfo>
         val backupStatusMessage = flowsArray[28] as? String
         val isBackupBusy = flowsArray[29] as Boolean
+        val isModelLoaded = flowsArray[30] as Boolean
+        val isModelInitializing = flowsArray[31] as Boolean
+        val loadedModelName = flowsArray[32] as? String
+        val hasSavedModelOnDisk = flowsArray[33] as Boolean
 
         // Filtragem do estoque
         val filteredItems = allItems.filter { item ->
@@ -454,6 +475,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isRagLoading = isRagLoading,
             ragModeAi = ragModeAi,
             pdfImportStatus = pdfImportStatus,
+            isModelLoaded = isModelLoaded,
+            isModelInitializing = isModelInitializing,
+            loadedModelName = loadedModelName,
+            hasSavedModelOnDisk = hasSavedModelOnDisk,
             availableBackups = availableBackups,
             backupStatusMessage = backupStatusMessage,
             isBackupBusy = isBackupBusy
@@ -490,6 +515,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun getLocalModelStatusText(): String = pdfRagManager.getActiveLocalModelDescription()
+
+    fun getPreferredBackend(): String = pdfRagManager.getPreferredBackend()
+
+    fun switchModelBackend(backendName: String) {
+        pdfRagManager.setPreferredBackend(backendName)
+        if (pdfRagManager.findLocalModelFile() != null) {
+            loadSavedModelFromDisk(forceReload = true)
+        } else {
+            _pdfImportStatus.value = "⚙️ Acelerador preferido alterado para $backendName. Selecione o arquivo .task para carregar."
+        }
+    }
 
     // --- Hardware Tools Controls ---
 
@@ -570,17 +606,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importModelFromUri(uri: Uri) {
         viewModelScope.launch {
-            _pdfImportStatus.value = "Copiando modelo LLM local (.task/.bin) para o armazenamento interno do app (aguarde)..."
-            val result = pdfRagManager.importModelFromUri(uri)
+            _isModelInitializing.value = true
+            _pdfImportStatus.value = "📥 Preparando modelo IA local (.task)..."
+            val result = pdfRagManager.importModelFromUri(uri) { progressMsg ->
+                _pdfImportStatus.value = progressMsg
+            }
             result.fold(
-                onSuccess = { name ->
-                    _pdfImportStatus.value = "✓ Modelo IA Local \"$name\" configurado e pronto para inferência offline!"
+                onSuccess = { nameWithBackend ->
+                    _isModelLoaded.value = pdfRagManager.isModelLoadedInMemory()
+                    _loadedModelName.value = pdfRagManager.getLoadedModelName()
+                    _hasSavedModelOnDisk.value = true
+                    _pdfImportStatus.value = "✅ Modelo \"$nameWithBackend\" carregado na memória e pronto (RAG + Tema Livre)!"
                     _ragModeAi.value = true
                 },
                 onFailure = { err ->
-                    _pdfImportStatus.value = "❌ Falha ao importar modelo IA: ${err.localizedMessage}"
+                    _isModelLoaded.value = pdfRagManager.isModelLoadedInMemory()
+                    _pdfImportStatus.value = "❌ Falha ao carregar modelo IA: ${err.localizedMessage}"
                 }
             )
+            _isModelInitializing.value = false
+        }
+    }
+
+    fun loadSavedModelFromDisk(forceReload: Boolean = false) {
+        viewModelScope.launch {
+            _isModelInitializing.value = true
+            _pdfImportStatus.value = "⚙️ Carregando modelo salvo na memória (LiteRT-LM ${pdfRagManager.getPreferredBackend()})..."
+            val result = pdfRagManager.loadExistingModelIntoMemory(forceReload = forceReload) { progressMsg ->
+                _pdfImportStatus.value = progressMsg
+            }
+            result.fold(
+                onSuccess = { nameWithBackend ->
+                    _isModelLoaded.value = pdfRagManager.isModelLoadedInMemory()
+                    _loadedModelName.value = pdfRagManager.getLoadedModelName()
+                    _hasSavedModelOnDisk.value = true
+                    _pdfImportStatus.value = "✅ Modelo \"$nameWithBackend\" carregado na memória e pronto!"
+                },
+                onFailure = { err ->
+                    _isModelLoaded.value = pdfRagManager.isModelLoadedInMemory()
+                    _pdfImportStatus.value = "❌ Falha ao carregar modelo: ${err.localizedMessage}"
+                }
+            )
+            _isModelInitializing.value = false
         }
     }
 
@@ -666,6 +733,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             _ragResponse.value = finalResp
+            _isModelLoaded.value = pdfRagManager.isModelLoadedInMemory()
+            _loadedModelName.value = pdfRagManager.getLoadedModelName()
             _chatMessages.value = _chatMessages.value.map { msg ->
                 if (msg.id == streamingAiId) {
                     msg.copy(
@@ -760,6 +829,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pendingFreeTopicQuestion = null
         lastAnsweredTopicQuery = null
         lastAnsweredWasFreeTopic = false
+        pdfRagManager.resetConversation()
         _chatMessages.value = listOf(createWelcomeMessage())
         _ragResponse.value = null
     }
