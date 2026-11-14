@@ -96,6 +96,7 @@ data class MainUiState(
     val currentAccuracyMeters: Float = 0f,
     val movementTrail: List<Pair<Double, Double>> = emptyList(),
     val gpsProviderInfo: String = "GPS STANDBY (Economia)",
+    val gpsFixCount: Int = 0,
     val selectedTab: Int = 0, // 0: Estoque, 1: Mapas, 2: Chat IA, 3: Ferramentas, 4: Família
 
     // Hardware states
@@ -178,6 +179,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         listOf(-22.9519 to -43.1850)
     )
     private val _gpsProviderInfo = MutableStateFlow("GPS STANDBY (Economia)")
+    private val _gpsFixCount = MutableStateFlow(0)
     private val _selectedTab = MutableStateFlow(0)
 
     // Chat RAG & Family Documents States
@@ -242,10 +244,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _currentAccuracyMeters.value = if (loc.hasAccuracy()) loc.accuracy else 0f
 
                     appendPointToTrail(newLat, newLon)
+                    _gpsFixCount.value += 1
 
                     val speedStr = String.format(Locale.US, "%.1f km/h", _currentSpeedKmh.value)
                     val accStr = if (loc.hasAccuracy()) "±${loc.accuracy.toInt()}m" else ""
-                    _gpsProviderInfo.value = "RASTREIO VIVO ATIVO • $speedStr $accStr"
+                    if (hardwareToolsManager.isLiveTracking.value) {
+                        _gpsProviderInfo.value = "RASTREIO VIVO ATIVO • $speedStr $accStr"
+                    }
                 }
             }
         }
@@ -377,7 +382,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isModelLoaded,
             _isModelInitializing,
             _loadedModelName,
-            _hasSavedModelOnDisk
+            _hasSavedModelOnDisk,
+            _gpsFixCount
         )
     ) { flowsArray: Array<Any?> ->
         @Suppress("UNCHECKED_CAST")
@@ -423,6 +429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val isModelInitializing = flowsArray[31] as Boolean
         val loadedModelName = flowsArray[32] as? String
         val hasSavedModelOnDisk = flowsArray[33] as Boolean
+        val gpsFixCount = flowsArray[34] as Int
 
         // Filtragem do estoque
         val filteredItems = allItems.filter { item ->
@@ -466,6 +473,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             currentAccuracyMeters = accuracyM,
             movementTrail = movementTrail,
             gpsProviderInfo = gpsProviderInfo,
+            gpsFixCount = gpsFixCount,
             selectedTab = tab,
             isTorchOn = isTorchOn,
             isSosActive = isSosActive,
@@ -581,7 +589,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (result.location != null) {
                 _currentLat.value = result.location.latitude
                 _currentLon.value = result.location.longitude
+                if (result.location.hasAccuracy()) {
+                    _currentAccuracyMeters.value = result.location.accuracy
+                }
+                if (result.location.hasBearing()) {
+                    _currentHeadingDegrees.value = result.location.bearing
+                }
                 appendPointToTrail(result.location.latitude, result.location.longitude)
+                _gpsFixCount.value += 1
                 _gpsProviderInfo.value = "FIX OBTIDO (${result.providerUsed}) em ${result.durationMs}ms • GPS DESLIGADO"
             } else {
                 _gpsProviderInfo.value = "TIMEOUT GPS (8s) • GPS DESLIGADO PARA SALVAR BATERIA"

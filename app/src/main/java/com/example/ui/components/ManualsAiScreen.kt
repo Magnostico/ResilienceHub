@@ -104,6 +104,7 @@ fun ManualsAiScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                // LINHA 1: Título + Ícones compactos (Limpar / Ver Base RAG)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -122,7 +123,7 @@ fun ManualsAiScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = if (showChatView) "IA ResilienceHub (RAG + Tema Livre)" else "Base RAG (${state.manualChunks.size} diretrizes)",
                                 fontSize = 13.sp,
@@ -133,9 +134,9 @@ fun ManualsAiScreen(
                             )
                             Text(
                                 text = if (state.isModelLoaded) {
-                                    "✓ Modelo Ativo: ${state.loadedModelName ?: "gemma-4-E2B-it.task"} + RAG"
+                                    "✓ Ativo: ${state.loadedModelName ?: "gemma-4-E2B-it.task"}"
                                 } else {
-                                    "Selecione o arquivo .task para inferência neural livre + RAG"
+                                    "Carregue o arquivo .task abaixo para IA Neural + RAG"
                                 },
                                 fontSize = 10.sp,
                                 color = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFFBBF24),
@@ -176,88 +177,97 @@ fun ManualsAiScreen(
                                 modifier = Modifier.size(17.dp)
                             )
                         }
+                    }
+                }
 
-                        OutlinedButton(
-                            onClick = { showEdgeModelDialog = true },
-                            border = BorderStroke(
-                                1.dp,
-                                if (state.isModelLoaded) Color(0xFF10B981) else Color(0xFFA855F7)
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // LINHA 2: Botões de Carregamento e Configuração do Modelo IA (100% visíveis em Retrato no Galaxy S25 FE)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Button(
+                        onClick = { modelPickerLauncher.launch("*/*") },
+                        enabled = !state.isModelInitializing,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (state.isModelLoaded) Color(0xFF065F46) else Color(0xFFA855F7),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(34.dp)
+                    ) {
+                        Icon(
+                            if (state.isModelLoaded) Icons.Default.CheckCircle else Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            tint = if (state.isModelLoaded) Color(0xFF34D399) else Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = if (state.isModelLoaded) "Trocar .task" else "Carregar Modelo .task",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (!state.isModelLoaded && state.hasSavedModelOnDisk && !state.isModelInitializing) {
+                        Button(
+                            onClick = { viewModel.loadSavedModelFromDisk() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF10B981),
+                                contentColor = Color(0xFF052E16)
                             ),
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             modifier = Modifier
-                                .height(30.dp)
-                                .testTag("btn_import_model")
+                                .weight(0.85f)
+                                .height(34.dp)
                         ) {
-                            Icon(
-                                if (state.isModelLoaded) Icons.Default.CheckCircle else Icons.Default.FolderOpen,
-                                contentDescription = null,
-                                tint = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFC084FC),
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = if (state.isModelLoaded) "Modelo ✓" else "Modelo .task",
-                                fontSize = 10.sp,
+                                text = "⚡ Ativar Salvo",
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFC084FC)
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
-                }
 
-                // Barra de ação direta para selecionar/carregar o arquivo .task quando ainda não carregado na memória
-                if (!state.isModelLoaded && !state.isModelInitializing) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Surface(
-                        color = Color(0xFF1A1033),
+                    OutlinedButton(
+                        onClick = { showEdgeModelDialog = true },
+                        border = BorderStroke(
+                            1.dp,
+                            if (state.isModelLoaded) Color(0xFF10B981) else Color(0xFFC084FC)
+                        ),
                         shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, Color(0xFFA855F7)),
-                        modifier = Modifier.fillMaxWidth()
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .weight(if (!state.isModelLoaded && state.hasSavedModelOnDisk) 0.75f else 0.85f)
+                            .height(34.dp)
+                            .testTag("btn_import_model")
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = "📂 Carregue seu arquivo gemma-4-E2B-it.task:",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFE9D5FF),
-                                modifier = Modifier.weight(1f)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            if (state.hasSavedModelOnDisk) {
-                                Button(
-                                    onClick = { viewModel.loadSavedModelFromDisk() },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFF10B981),
-                                        contentColor = Color(0xFF052E16)
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(28.dp)
-                                ) {
-                                    Text("⚡ Ativar Salvo", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
-                                }
-                                Spacer(modifier = Modifier.width(4.dp))
-                            }
-                            Button(
-                                onClick = { modelPickerLauncher.launch("*/*") },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFA855F7),
-                                    contentColor = Color.White
-                                ),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(13.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Selecionar .task", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
-                            }
-                        }
+                        Icon(
+                            Icons.Default.Memory,
+                            contentDescription = null,
+                            tint = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFC084FC),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (state.isModelLoaded) "Motor: ${viewModel.getPreferredBackend()}" else "Motor GPU/CPU",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (state.isModelLoaded) Color(0xFF34D399) else Color(0xFFE9D5FF),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
 

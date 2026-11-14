@@ -349,34 +349,59 @@ class HardwareToolsManager(private val context: Context) {
                     override fun onProviderDisabled(provider: String) {}
                 }
 
-                // Tenta GPS_PROVIDER se habilitado, com fallback para NETWORK_PROVIDER
-                val hasGps = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
-                val hasNet = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+                // Registra simultaneamente GPS_PROVIDER, FUSED e NETWORK_PROVIDER para resposta imediata indoor/outdoor
+                val hasGps = runCatching { locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
+                val hasNet = runCatching { locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
+                val hasFused = runCatching {
+                    locationManager.allProviders.contains("fused") && locationManager.isProviderEnabled("fused")
+                }.getOrDefault(false)
 
+                var anyRegistered = false
                 if (hasGps && hasFine) {
-                    locationManager.requestLocationUpdates(
-                        LocationManager.GPS_PROVIDER,
-                        0L,
-                        0f,
-                        listener,
-                        Looper.getMainLooper()
-                    )
-                } else if (hasNet) {
-                    locationManager.requestLocationUpdates(
-                        LocationManager.NETWORK_PROVIDER,
-                        0L,
-                        0f,
-                        listener,
-                        Looper.getMainLooper()
-                    )
-                } else {
-                    val lastKnown = locationManager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER)
+                    runCatching {
+                        locationManager.requestLocationUpdates(
+                            LocationManager.GPS_PROVIDER,
+                            0L,
+                            0f,
+                            listener,
+                            Looper.getMainLooper()
+                        )
+                        anyRegistered = true
+                    }
+                }
+                if (hasFused) {
+                    runCatching {
+                        locationManager.requestLocationUpdates(
+                            "fused",
+                            0L,
+                            0f,
+                            listener,
+                            Looper.getMainLooper()
+                        )
+                        anyRegistered = true
+                    }
+                }
+                if (hasNet) {
+                    runCatching {
+                        locationManager.requestLocationUpdates(
+                            LocationManager.NETWORK_PROVIDER,
+                            0L,
+                            0f,
+                            listener,
+                            Looper.getMainLooper()
+                        )
+                        anyRegistered = true
+                    }
+                }
+
+                if (!anyRegistered) {
+                    val lastKnown = getBestLastKnownLocation()
                     cont.resume(lastKnown)
                     return@suspendCancellableCoroutine
                 }
 
                 cont.invokeOnCancellation {
-                    locationManager.removeUpdates(listener)
+                    runCatching { locationManager.removeUpdates(listener) }
                 }
             }
         }
@@ -385,17 +410,31 @@ class HardwareToolsManager(private val context: Context) {
         _isGpsActive.value = false
 
         if (result != null) {
-            GpsPulseResult(result, result.provider ?: "GPS", duration, true)
+            _liveLocation.value = result
+            GpsPulseResult(result, result.provider?.uppercase() ?: "GPS", duration, true)
         } else {
-            // Em caso de timeout no fix de satélites dentro dos 8s, busca o último cache passivo
-            val lastCached = try {
-                locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                    ?: locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                    ?: locationManager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER)
-            } catch (e: Exception) {
-                null
+            // Em caso de timeout no fix de satélites dentro dos 8s, busca o último cache mais recente
+            val lastCached = getBestLastKnownLocation()
+            if (lastCached != null) {
+                _liveLocation.value = lastCached
             }
             GpsPulseResult(lastCached, "CACHE_FALLBACK", duration, lastCached != null)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun getBestLastKnownLocation(): Location? {
+        return try {
+            val providers = listOf("fused", LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+            providers.mapNotNull { provider ->
+                runCatching {
+                    if (locationManager.allProviders.contains(provider)) {
+                        locationManager.getLastKnownLocation(provider)
+                    } else null
+                }.getOrNull()
+            }.maxByOrNull { it.time }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -433,30 +472,44 @@ class HardwareToolsManager(private val context: Context) {
             _isLiveTracking.value = true
             _isGpsActive.value = true
 
-            // Emite imediatamente a última posição conhecida se disponível
-            val lastKnown = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                ?: locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            // Emite imediatamente a última posição conhecida mais recente se disponível
+            val lastKnown = getBestLastKnownLocation()
             if (lastKnown != null) {
                 _liveLocation.value = lastKnown
             }
 
-            if (hasFine && locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    1500L, // Atualiza a cada 1.5s
-                    1.0f,  // Ou a cada 1 metro de deslocamento
-                    listener,
-                    Looper.getMainLooper()
-                )
+            if (hasFine && runCatching { locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)) {
+                runCatching {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER,
+                        1000L, // Atualiza a cada 1.0s
+                        0.5f,  // Ou a cada 0.5 metro de deslocamento
+                        listener,
+                        Looper.getMainLooper()
+                    )
+                }
             }
-            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    2500L,
-                    1.5f,
-                    listener,
-                    Looper.getMainLooper()
-                )
+            if (runCatching { locationManager.allProviders.contains("fused") && locationManager.isProviderEnabled("fused") }.getOrDefault(false)) {
+                runCatching {
+                    locationManager.requestLocationUpdates(
+                        "fused",
+                        1000L,
+                        0.5f,
+                        listener,
+                        Looper.getMainLooper()
+                    )
+                }
+            }
+            if (runCatching { locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)) {
+                runCatching {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        1500L,
+                        1.0f,
+                        listener,
+                        Looper.getMainLooper()
+                    )
+                }
             }
             true
         } catch (e: Exception) {
