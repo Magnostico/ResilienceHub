@@ -83,6 +83,18 @@ class HardwareToolsManager(private val context: Context) {
     private var whistleJob: Job? = null
     private var audioTrack: AudioTrack? = null
 
+    // Onda senoidal de 3000 Hz pré-calculada uma única vez sob demanda (evita 44.100 chamadas de sin() a cada ativação)
+    private val cachedWhistlePcmBuffer: ShortArray by lazy {
+        val numSamples = SAMPLE_RATE
+        val generatedSnd = ShortArray(numSamples)
+        val doubleFreq = WHISTLE_FREQUENCY_HZ.toDouble()
+        for (i in 0 until numSamples) {
+            val angle = 2.0 * Math.PI * i / (SAMPLE_RATE / doubleFreq)
+            generatedSnd[i] = (sin(angle) * Short.MAX_VALUE * 0.95).toInt().toShort()
+        }
+        generatedSnd
+    }
+
     private val cameraManager by lazy {
         context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     }
@@ -219,15 +231,8 @@ class HardwareToolsManager(private val context: Context) {
 
         whistleJob?.cancel()
         whistleJob = scope.launch(Dispatchers.Default) {
-            val numSamples = SAMPLE_RATE // 1 segundo de áudio gerado
-            val generatedSnd = ShortArray(numSamples)
-            val doubleFreq = WHISTLE_FREQUENCY_HZ.toDouble()
-
-            // Síntese de onda senoidal pura a 3000 Hz
-            for (i in 0 until numSamples) {
-                val angle = 2.0 * Math.PI * i / (SAMPLE_RATE / doubleFreq)
-                generatedSnd[i] = (sin(angle) * Short.MAX_VALUE * 0.95).toInt().toShort()
-            }
+            val generatedSnd = cachedWhistlePcmBuffer
+            val numSamples = generatedSnd.size
 
             val minBufferSize = AudioTrack.getMinBufferSize(
                 SAMPLE_RATE,
@@ -329,6 +334,21 @@ class HardwareToolsManager(private val context: Context) {
 
         if (!hasFine && !hasCoarse) {
             return@withContext GpsPulseResult(null, "NO_PERMISSION", 0, false)
+        }
+
+        // Economia de bateria: se já houver um fix muito recente (<= 4.5s e boa precisão), usa sem ligar o rádio GPS
+        val freshCached = getBestLastKnownLocation()
+        if (freshCached != null &&
+            (System.currentTimeMillis() - freshCached.time) in 0..4_500L &&
+            (!freshCached.hasAccuracy() || freshCached.accuracy <= 25f)
+        ) {
+            _liveLocation.value = freshCached
+            return@withContext GpsPulseResult(
+                freshCached,
+                freshCached.provider?.uppercase() ?: "GPS_RECENT",
+                System.currentTimeMillis() - startTime,
+                true
+            )
         }
 
         _isGpsActive.value = true
@@ -456,8 +476,19 @@ class HardwareToolsManager(private val context: Context) {
         if (!hasFine && !hasCoarse) return false
         if (_isLiveTracking.value) return true
 
+        var lastEmittedTimeMs = 0L
+        var lastEmittedLocation: Location? = null
+
         val listener = object : LocationListener {
             override fun onLocationChanged(loc: Location) {
+                val now = System.currentTimeMillis()
+                val prev = lastEmittedLocation
+                // Deduplica callbacks simultâneos (ex: GPS + Fused disparando no mesmo milissegundo ou sem sair do lugar)
+                if (prev != null && (now - lastEmittedTimeMs) < 450L && prev.distanceTo(loc) < 0.8f) {
+                    return
+                }
+                lastEmittedTimeMs = now
+                lastEmittedLocation = loc
                 _liveLocation.value = loc
             }
 
@@ -475,35 +506,52 @@ class HardwareToolsManager(private val context: Context) {
             // Emite imediatamente a última posição conhecida mais recente se disponível
             val lastKnown = getBestLastKnownLocation()
             if (lastKnown != null) {
+                lastEmittedLocation = lastKnown
+                lastEmittedTimeMs = System.currentTimeMillis()
                 _liveLocation.value = lastKnown
             }
 
+            var registeredHighPrecision = false
             if (hasFine && runCatching { locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)) {
                 runCatching {
                     locationManager.requestLocationUpdates(
                         LocationManager.GPS_PROVIDER,
-                        1000L, // Atualiza a cada 1.0s
-                        0.5f,  // Ou a cada 0.5 metro de deslocamento
+                        1200L, // Atualiza a cada 1.2s em movimento
+                        1.0f,  // Ignora micro-ruído quando parado (< 1 metro) para economizar bateria e CPU
                         listener,
                         Looper.getMainLooper()
                     )
+                    registeredHighPrecision = true
                 }
             }
             if (runCatching { locationManager.allProviders.contains("fused") && locationManager.isProviderEnabled("fused") }.getOrDefault(false)) {
                 runCatching {
                     locationManager.requestLocationUpdates(
                         "fused",
-                        1000L,
-                        0.5f,
+                        1200L,
+                        1.0f,
+                        listener,
+                        Looper.getMainLooper()
+                    )
+                    registeredHighPrecision = true
+                }
+            }
+            // Só ativa varredura contínua de rede (Wi-Fi/antenas) se nem GPS nem Fused estiverem ativos;
+            // caso contrário usa PASSIVE_PROVIDER (custo zero de bateria adicional)
+            if (!registeredHighPrecision && runCatching { locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)) {
+                runCatching {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        2000L,
+                        1.5f,
                         listener,
                         Looper.getMainLooper()
                     )
                 }
-            }
-            if (runCatching { locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)) {
+            } else if (runCatching { locationManager.allProviders.contains(LocationManager.PASSIVE_PROVIDER) }.getOrDefault(false)) {
                 runCatching {
                     locationManager.requestLocationUpdates(
-                        LocationManager.NETWORK_PROVIDER,
+                        LocationManager.PASSIVE_PROVIDER,
                         1500L,
                         1.0f,
                         listener,

@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
@@ -32,6 +33,7 @@ import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -43,8 +45,9 @@ import java.util.zip.ZipOutputStream
  *   em um único arquivo leve `.zip`.
  * - Salva na pasta pública `Download/ResilienceHub_Backups/` (que SOBREVIVE à desinstalação do app ou limpeza de cache/dados)
  *   e mantém um espelho rápido no armazenamento externo do app.
- * - Política Anti-Entupimento: Mantém no máximo 3 arquivos de backup rotativos (`MAX_ROLLING_BACKUPS = 3`),
- *   apagando automaticamente versões antigas para nunca ocupar espaço desnecessário no celular.
+ * - Política "1 Backup por Dia" (Zero Entupimento): cada dia tem um único arquivo `ResilienceHub_Backup_yyyyMMdd.zip`,
+ *   sobrescrito com a versão mais recente a cada alteração; ficam guardados apenas os últimos
+ *   `MAX_ROLLING_BACKUPS` dias, e o auto-backup é pulado quando nada mudou (economia de bateria).
  */
 class BackupManager(
     private val context: Context,
@@ -60,6 +63,51 @@ class BackupManager(
         private const val MAP_TILES_DIR_NAME = "osm_tiles_v4"
         private const val MAP_TILES_ZIP_PREFIX = "osm_tiles_v4/"
         private const val STREET_CACHE_FILE_NAME = "street_names_cache.json"
+
+        // Política "1 backup por dia": o arquivo do dia é sobrescrito a cada alteração,
+        // e dias diferentes ficam em arquivos separados (máximo de MAX_ROLLING_BACKUPS dias).
+        private const val BACKUP_FILE_PREFIX = "ResilienceHub_Backup_"
+        private const val PREFS_NAME = "resilience_backup_prefs"
+        private const val PREF_LAST_FINGERPRINT = "last_backup_fingerprint"
+        private const val PREF_LAST_DAY = "last_backup_day"
+        private const val IO_BUFFER_SIZE = 64 * 1024
+
+        /** Extrai a chave do dia (yyyyMMdd) do nome do arquivo de backup (formato novo e antigo). */
+        fun dayKeyFromFileName(name: String): String? {
+            if (!name.startsWith(BACKUP_FILE_PREFIX)) return null
+            val digits = name.removePrefix(BACKUP_FILE_PREFIX).take(8)
+            return if (digits.length == 8 && digits.all { it.isDigit() }) digits else null
+        }
+    }
+
+    private val prefs by lazy { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
+
+    /**
+     * Impressão digital barata de todo o conteúdo do backup. Se nada mudou desde o último
+     * backup do dia, o auto-backup é pulado (evita recompactar milhares de blocos de mapa à toa
+     * = economia grande de bateria, CPU e escrita no armazenamento).
+     */
+    private fun computeContentFingerprint(
+        items: List<InventoryItemEntity>,
+        profiles: List<FamilyProfileEntity>,
+        pois: List<MapPoiEntity>,
+        customChunks: List<ManualChunkFtsEntity>,
+        familyDocs: List<FamilyDocument>,
+        mapTileFiles: List<File>
+    ): String {
+        var tilesBytes = 0L
+        mapTileFiles.forEach { tilesBytes += it.length() }
+        val streetSig = if (streetNamesCacheFile.exists()) streetNamesCacheFile.length() else 0L
+        return listOf(
+            items.hashCode(),
+            profiles.hashCode(),
+            pois.hashCode(),
+            customChunks.hashCode(),
+            familyDocs.hashCode(),
+            mapTileFiles.size,
+            tilesBytes,
+            streetSig
+        ).joinToString("|")
     }
 
     data class BackupSnapshotInfo(
@@ -132,12 +180,28 @@ class BackupManager(
             }
 
             val now = System.currentTimeMillis()
-            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(now))
-            val fileName = "ResilienceHub_Backup_$stamp.zip"
-
-            // 1. Gera o pacote ZIP em memória/arquivo local
+            val dayKey = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(now))
+            // 1 arquivo por dia: o backup do dia é sobrescrito com a versão mais recente
+            val fileName = "$BACKUP_FILE_PREFIX$dayKey.zip"
             val localZipFile = File(internalBackupDir, fileName)
-            FileOutputStream(localZipFile).use { fos ->
+
+            // Economia de bateria: se for auto-backup e nada mudou desde o backup de hoje, não recompacta nada
+            val fingerprint = computeContentFingerprint(items, profiles, pois, customChunks, familyDocs, mapTileFiles)
+            if (isAutoBackup &&
+                prefs.getString(PREF_LAST_DAY, null) == dayKey &&
+                prefs.getString(PREF_LAST_FINGERPRINT, null) == fingerprint &&
+                localZipFile.exists()
+            ) {
+                return@withContext BackupResult(
+                    isSuccess = false,
+                    message = "Auto-backup ignorado (nada mudou desde o backup de hoje)."
+                )
+            }
+
+            // 1. Gera o pacote ZIP num arquivo temporário e só depois substitui o backup do dia
+            //    (se algo falhar no meio, o backup bom de hoje continua intacto)
+            val tempZipFile = File(internalBackupDir, "$fileName.partial")
+            FileOutputStream(tempZipFile).use { fos ->
                 writeBackupZipToStream(
                     outputStream = fos,
                     timestamp = now,
@@ -149,12 +213,22 @@ class BackupManager(
                     mapTileFiles = mapTileFiles
                 )
             }
+            if (localZipFile.exists()) localZipFile.delete()
+            if (!tempZipFile.renameTo(localZipFile)) {
+                tempZipFile.copyTo(localZipFile, overwrite = true)
+                tempZipFile.delete()
+            }
 
-            // 2. Aplica rotação anti-entupimento na pasta local (mantém apenas os 3 mais recentes)
+            // 2. Aplica a política "1 por dia" na pasta local (mantém só os últimos dias)
             enforceMaxBackupsInFolder(internalBackupDir, MAX_ROLLING_BACKUPS)
 
             // 3. Copia também para a pasta pública `Download/ResilienceHub_Backups/` (sobrevive a desinstalar o app!)
             val savedPublicPath = saveToPublicDownloadsFolder(localZipFile, fileName)
+
+            prefs.edit()
+                .putString(PREF_LAST_DAY, dayKey)
+                .putString(PREF_LAST_FINGERPRINT, fingerprint)
+                .apply()
 
             val sizeKb = (localZipFile.length() / 1024L).coerceAtLeast(1L)
             val formattedDate = SimpleDateFormat("dd/MM/yyyy 'às' HH:mm", Locale.getDefault()).format(Date(now))
@@ -290,8 +364,13 @@ class BackupManager(
                 }
         }
 
+        // 1 backup por dia: se houver mais de um arquivo do mesmo dia, mostra só o mais recente
         val snapshots = candidateFiles.values
             .sortedByDescending { it.first.lastModified() }
+            .distinctBy { (file, _) ->
+                dayKeyFromFileName(file.name)
+                    ?: SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(file.lastModified()))
+            }
             .take(MAX_ROLLING_BACKUPS)
             .mapNotNull { (file, isPublic) ->
                 readSnapshotMetadata(file, isPublic)
@@ -324,8 +403,8 @@ class BackupManager(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
                 val resolver = context.contentResolver
-                // Limpa entradas antigas excedentes criadas pelo próprio app no MediaStore
-                cleanupOldMediaStoreBackups()
+                // Limpa o backup de hoje (será regravado), duplicatas do dia e dias excedentes no MediaStore
+                cleanupOldMediaStoreBackups(fileName)
 
                 val contentValues = ContentValues().apply {
                     put(MediaStore.Downloads.DISPLAY_NAME, fileName)
@@ -339,7 +418,7 @@ class BackupManager(
                 if (itemUri != null) {
                     resolver.openOutputStream(itemUri)?.use { out ->
                         FileInputStream(sourceZip).use { input ->
-                            input.copyTo(out)
+                            input.copyTo(out, IO_BUFFER_SIZE)
                         }
                     }
                     contentValues.clear()
@@ -355,25 +434,39 @@ class BackupManager(
     }
 
     /**
-     * Garante que nunca existam mais do que `maxFiles` (3) na pasta, apagando os mais antigos.
+     * Política "1 backup por dia": em cada dia fica só o arquivo mais recente (inclui limpeza de
+     * arquivos antigos no formato com hora), e no total ficam no máximo `maxDays` dias.
      */
-    private fun enforceMaxBackupsInFolder(folder: File, maxFiles: Int) {
+    private fun enforceMaxBackupsInFolder(folder: File, maxDays: Int) {
         try {
             val zipFiles = folder.listFiles { f -> f.isFile && f.name.endsWith(".zip", true) }
                 ?.sortedByDescending { it.lastModified() }
                 ?: return
 
-            if (zipFiles.size > maxFiles) {
-                zipFiles.drop(maxFiles).forEach { oldFile ->
-                    runCatching { oldFile.delete() }
+            val keptDays = LinkedHashSet<String>()
+            zipFiles.forEach { file ->
+                val day = dayKeyFromFileName(file.name)
+                    ?: SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(file.lastModified()))
+                val keep = !keptDays.contains(day) && keptDays.size < maxDays
+                if (keep) {
+                    keptDays.add(day)
+                } else {
+                    runCatching { file.delete() }
                 }
             }
+            // Remove sobras de gravações interrompidas
+            folder.listFiles { f -> f.isFile && f.name.endsWith(".partial", true) }
+                ?.forEach { runCatching { it.delete() } }
         } catch (e: Exception) {
-            Log.w(TAG, "Falha ao rotacionar backups antigos", e)
+            Log.w(TAG, "Falha ao aplicar política de 1 backup por dia", e)
         }
     }
 
-    private fun cleanupOldMediaStoreBackups() {
+    /**
+     * Remove do MediaStore (Download/ResilienceHub_Backups) o backup de hoje que será substituído,
+     * duplicatas do mesmo dia e dias excedentes, mantendo (MAX_ROLLING_BACKUPS - 1) dias anteriores.
+     */
+    private fun cleanupOldMediaStoreBackups(todayFileName: String) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         try {
             val resolver = context.contentResolver
@@ -384,23 +477,32 @@ class BackupManager(
                 MediaStore.Downloads.DATE_MODIFIED
             )
             val selection = "${MediaStore.Downloads.DISPLAY_NAME} LIKE ?"
-            val selectionArgs = arrayOf("ResilienceHub_Backup_%.zip")
+            val selectionArgs = arrayOf("$BACKUP_FILE_PREFIX%.zip")
             val sortOrder = "${MediaStore.Downloads.DATE_MODIFIED} DESC"
+            val todayKey = dayKeyFromFileName(todayFileName)
 
-            val ids = mutableListOf<Long>()
+            val idsToDelete = mutableListOf<Long>()
+            val keptDays = LinkedHashSet<String>()
             resolver.query(collection, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
                 val idCol = cursor.getColumnIndexOrThrow(MediaStore.Downloads._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME)
                 while (cursor.moveToNext()) {
-                    ids.add(cursor.getLong(idCol))
+                    val id = cursor.getLong(idCol)
+                    val name = cursor.getString(nameCol) ?: ""
+                    val day = dayKeyFromFileName(name) ?: name
+                    when {
+                        // O arquivo de hoje será regravado agora
+                        day == todayKey -> idsToDelete.add(id)
+                        keptDays.contains(day) -> idsToDelete.add(id)
+                        keptDays.size >= MAX_ROLLING_BACKUPS - 1 -> idsToDelete.add(id)
+                        else -> keptDays.add(day)
+                    }
                 }
             }
 
-            // Como vamos inserir +1 agora, mantemos no máximo (MAX_ROLLING_BACKUPS - 1) anteriores
-            if (ids.size >= MAX_ROLLING_BACKUPS) {
-                ids.drop(MAX_ROLLING_BACKUPS - 1).forEach { oldId ->
-                    val uri = Uri.withAppendedPath(collection, oldId.toString())
-                    runCatching { resolver.delete(uri, null, null) }
-                }
+            idsToDelete.forEach { oldId ->
+                val uri = Uri.withAppendedPath(collection, oldId.toString())
+                runCatching { resolver.delete(uri, null, null) }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Aviso ao limpar backups antigos no MediaStore", e)
@@ -515,7 +617,8 @@ class BackupManager(
             put("familyDocs", docsArr)
         }
 
-        ZipOutputStream(outputStream).use { zos ->
+        // Buffer de 64 KB = menos chamadas de escrita no armazenamento (menos CPU/bateria)
+        ZipOutputStream(BufferedOutputStream(outputStream, IO_BUFFER_SIZE)).use { zos ->
             // 1. Grava o JSON principal
             val jsonEntry = ZipEntry(DATA_JSON_ENTRY)
             zos.putNextEntry(jsonEntry)
@@ -549,6 +652,8 @@ class BackupManager(
             }
 
             // 4. Grava todos os Blocos de Mapa Offline salvos (`osm_tiles_v4/{z}/{x}/{y}.png`)
+            // PNG já é comprimido: gravar sem recompressão economiza muita CPU/bateria e o ZIP fica praticamente do mesmo tamanho
+            zos.setLevel(Deflater.NO_COMPRESSION)
             val baseFilesDirPath = context.filesDir.absolutePath
             mapTileFiles.forEach { tileFile ->
                 runCatching {

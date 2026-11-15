@@ -2198,7 +2198,7 @@ fun BackupRestoreDialog(
                         Text(
                             text = "• A cada alteração no Estoque, Família, PDFs, Pins Estratégicos ou download de Mapa Offline, o app salva uma cópia compactada (.zip) na pasta pública Download/ResilienceHub_Backups.\n" +
                                 "• Inclui 100% dos blocos de mapa baixados, nomes de ruas e seus Pins Estratégicos: ao restaurar, o mapa inteiro abre sem nunca precisar de internet!\n" +
-                                "• Para NÃO entupir seu celular, o sistema mantém no máximo 3 backups recentes e apaga os antigos sozinho.",
+                                "• Para NÃO entupir seu celular, fica apenas 1 backup por dia (o do dia é atualizado a cada alteração) e só os últimos 3 dias são mantidos; os antigos são apagados sozinhos.",
                             fontSize = 11.sp,
                             lineHeight = 16.sp,
                             color = Color(0xFFE2E8F0)
@@ -2295,7 +2295,7 @@ fun BackupRestoreDialog(
 
                 // Lista dos últimos 3 snapshots automáticos encontrados na pasta
                 Text(
-                    text = "Últimos Backups Automáticos no Aparelho (${state.availableBackups.size}/3):",
+                    text = "Backups Diários no Aparelho (1 por dia • ${state.availableBackups.size}/3 dias):",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color(0xFFFBBF24)

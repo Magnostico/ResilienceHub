@@ -78,8 +78,14 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.*
 
 private const val TILE_CACHE_DIR_NAME = "osm_tiles_v4"
+private const val MAX_IN_MEMORY_TILES = 220
 private const val VALID_TILE_USER_AGENT =
     "ResilienceHubApp/2.0 (Android; https://github.com/Magnostico/ResilienceHub)"
+
+// Cache em RAM dos nomes de ruas já resolvidos para evitar leitura/parse de disco a cada passo do GPS
+private val streetNamesMemoryCache = ConcurrentHashMap<String, String>()
+@Volatile
+private var streetNamesDiskLoaded = false
 
 private const val DEL_CASTILHO_LAT = -22.8792
 private const val DEL_CASTILHO_LON = -43.2718
@@ -535,10 +541,11 @@ fun OfflineMapScreen(
         tileRenderVersion++
     }
 
-    // Reatualiza a contagem e renderização de blocos de mapa sempre que um Backup é criado/restaurado ou os Pins mudam
-    LaunchedEffect(state.availableBackups, state.pois.size, state.backupStatusMessage) {
-        val diskCount = withContext(Dispatchers.IO) { countCachedTilesOnDisk(context) }
-        if (diskCount != cachedTilesCount) {
+    // Reatualiza a contagem e renderização de blocos de mapa apenas quando um Backup é restaurado
+    LaunchedEffect(state.backupStatusMessage) {
+        if (state.backupStatusMessage?.contains("Restaurado", ignoreCase = true) == true) {
+            streetNamesDiskLoaded = false
+            val diskCount = withContext(Dispatchers.IO) { countCachedTilesOnDisk(context) }
             cachedTilesCount = diskCount
             tileRenderVersion++
         }
@@ -2133,6 +2140,9 @@ private fun InteractiveOfflineMapCanvas(
                     if (res != null) {
                         val (bmp, newlySaved) = res
                         withContext(Dispatchers.Main) {
+                            if (tileBitmapCache.size >= MAX_IN_MEMORY_TILES && !tileBitmapCache.containsKey(key)) {
+                                tileBitmapCache.keys.firstOrNull()?.let { tileBitmapCache.remove(it) }
+                            }
                             tileBitmapCache[key] = bmp
                             currentOnTileLoaded(newlySaved)
                         }
@@ -2210,6 +2220,48 @@ private fun InteractiveOfflineMapCanvas(
             -23.0120 to -43.4100, // Reserva / Recreio
             -23.0250 to -43.4800
         )
+    }
+
+    // Objetos Paint e Path pré-alocados uma única vez fora do loop de 60 FPS do Canvas (zero GC / economia de CPU e bateria)
+    val reusablePath = remember { Path() }
+    val dashEffectReticule = remember { PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f) }
+    val dashEffectRoute = remember { PathEffect.dashPathEffect(floatArrayOf(16f, 10f), 0f) }
+    val boldTypeface = remember { Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
+
+    val roadLabelPaint = remember(boldTypeface) {
+        Paint().apply {
+            color = android.graphics.Color.argb(245, 254, 240, 138)
+            typeface = boldTypeface
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
+        }
+    }
+    val neighborhoodPaint = remember(boldTypeface) {
+        Paint().apply {
+            color = android.graphics.Color.argb(225, 241, 245, 249)
+            typeface = boldTypeface
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
+        }
+    }
+    val poiLabelPaint = remember(boldTypeface) {
+        Paint().apply {
+            color = android.graphics.Color.WHITE
+            typeface = boldTypeface
+            isAntiAlias = true
+            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
+        }
+    }
+    val userStreetPaint = remember(boldTypeface) {
+        Paint().apply {
+            color = android.graphics.Color.argb(255, 254, 240, 138)
+            typeface = boldTypeface
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            setShadowLayer(8f, 0f, 1.5f, android.graphics.Color.BLACK)
+        }
     }
 
     Canvas(
@@ -2436,51 +2488,41 @@ private fun InteractiveOfflineMapCanvas(
         // 3. Cartografia Vetorial Completa do Município do Rio de Janeiro (Del Castilho, Zona Norte, Sul, Centro e Oeste)
         val isNearRioMunicipio = centerLat in -23.15..-22.70 && centerLon in -43.80..-43.05
         if (isNearRioMunicipio) {
-            val lagoaPath = Path().apply {
-                lagoaPolygon.forEachIndexed { idx, (lat, lon) ->
-                    val pt = toScreen(lat, lon)
-                    if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
-                }
-                close()
+            reusablePath.reset()
+            lagoaPolygon.forEachIndexed { idx, (lat, lon) ->
+                val pt = toScreen(lat, lon)
+                if (idx == 0) reusablePath.moveTo(pt.x, pt.y) else reusablePath.lineTo(pt.x, pt.y)
             }
+            reusablePath.close()
             drawPath(
-                path = lagoaPath,
+                path = reusablePath,
                 color = Color(0xFF0284C7).copy(alpha = if (showStreetTiles && loadedTilesInView > 0) 0.14f else 0.38f)
             )
             drawPath(
-                path = lagoaPath,
+                path = reusablePath,
                 color = Color(0xFF38BDF8).copy(alpha = 0.55f),
                 style = Stroke(width = 1.5.dp.toPx())
             )
 
-            val coastPath = Path().apply {
-                coastlineOrla.forEachIndexed { idx, (lat, lon) ->
-                    val pt = toScreen(lat, lon)
-                    if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
-                }
+            reusablePath.reset()
+            coastlineOrla.forEachIndexed { idx, (lat, lon) ->
+                val pt = toScreen(lat, lon)
+                if (idx == 0) reusablePath.moveTo(pt.x, pt.y) else reusablePath.lineTo(pt.x, pt.y)
             }
             drawPath(
-                path = coastPath,
+                path = reusablePath,
                 color = Color(0xFF0EA5E9).copy(alpha = 0.50f),
                 style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
 
-            val roadLabelPaint = Paint().apply {
-                color = android.graphics.Color.argb(245, 254, 240, 138)
-                textSize = 11.2.sp.toPx()
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                textAlign = Paint.Align.CENTER
-                isAntiAlias = true
-                setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
-            }
+            roadLabelPaint.textSize = 11.2.sp.toPx()
 
             ALL_RIO_NAMED_ROADS.forEach { road ->
                 if (!showStreetTiles || loadedTilesInView == 0 || isDrivingWazeMode) {
-                    val roadPath = Path().apply {
-                        road.points.forEachIndexed { idx, (lat, lon) ->
-                            val pt = toScreen(lat, lon)
-                            if (idx == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
-                        }
+                    reusablePath.reset()
+                    road.points.forEachIndexed { idx, (lat, lon) ->
+                        val pt = toScreen(lat, lon)
+                        if (idx == 0) reusablePath.moveTo(pt.x, pt.y) else reusablePath.lineTo(pt.x, pt.y)
                     }
                     val roadColor = when {
                         road.isExpressway && (!showStreetTiles || loadedTilesInView == 0) -> Color(0xFFF59E0B).copy(alpha = 0.78f)
@@ -2488,7 +2530,7 @@ private fun InteractiveOfflineMapCanvas(
                         else -> Color(0xFFF59E0B).copy(alpha = 0.28f)
                     }
                     drawPath(
-                        path = roadPath,
+                        path = reusablePath,
                         color = roadColor,
                         style = Stroke(
                             width = if (road.isExpressway) 3.8.dp.toPx() else 2.8.dp.toPx(),
@@ -2504,14 +2546,7 @@ private fun InteractiveOfflineMapCanvas(
                 }
             }
 
-            val neighborhoodPaint = Paint().apply {
-                color = android.graphics.Color.argb(225, 241, 245, 249)
-                textSize = if (zoomFloat >= 15f) 11.5.sp.toPx() else 9.8.sp.toPx()
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                textAlign = Paint.Align.CENTER
-                isAntiAlias = true
-                setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
-            }
+            neighborhoodPaint.textSize = if (zoomFloat >= 15f) 11.5.sp.toPx() else 9.8.sp.toPx()
             ALL_RIO_NEIGHBORHOODS.forEach { (name, lat, lon) ->
                 val pt = toScreen(lat, lon)
                 if (pt.x in 0f..w && pt.y in 0f..h) {
@@ -2522,23 +2557,23 @@ private fun InteractiveOfflineMapCanvas(
 
         // 4. TRILHA DE MOVIMENTAÇÃO DO USUÁRIO (BREADCRUMB TRAIL)
         if (movementTrail.size >= 2) {
-            val trailPath = Path()
+            reusablePath.reset()
             var hasVisibleSegment = false
             movementTrail.forEachIndexed { index, (tLat, tLon) ->
                 val pt = toScreen(tLat, tLon)
                 if (pt.x in -w..(2 * w) && pt.y in -h..(2 * h)) {
                     hasVisibleSegment = true
                 }
-                if (index == 0) trailPath.moveTo(pt.x, pt.y) else trailPath.lineTo(pt.x, pt.y)
+                if (index == 0) reusablePath.moveTo(pt.x, pt.y) else reusablePath.lineTo(pt.x, pt.y)
             }
             if (hasVisibleSegment) {
                 drawPath(
-                    path = trailPath,
+                    path = reusablePath,
                     color = Color(0xFF0284C7).copy(alpha = 0.55f),
                     style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                 )
                 drawPath(
-                    path = trailPath,
+                    path = reusablePath,
                     color = Color(0xFF38BDF8),
                     style = Stroke(width = 3.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                 )
@@ -2616,19 +2651,13 @@ private fun InteractiveOfflineMapCanvas(
                     start = startPt,
                     end = endPt,
                     strokeWidth = 3.2.dp.toPx(),
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(16f, 10f), 0f)
+                    pathEffect = dashEffectRoute
                 )
             }
         }
 
         // 6. Marcadores Geográficos de todos os Pins Estratégicos e POIs do Banco Room
-        val poiLabelPaint = Paint().apply {
-            color = android.graphics.Color.WHITE
-            textSize = 12.sp.toPx()
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            isAntiAlias = true
-            setShadowLayer(6f, 0f, 1f, android.graphics.Color.BLACK)
-        }
+        poiLabelPaint.textSize = 12.sp.toPx()
 
         pois.forEach { poi ->
             val pt = toScreen(poi.latitude, poi.longitude)
@@ -2684,7 +2713,7 @@ private fun InteractiveOfflineMapCanvas(
                     color = Color(0xFF38BDF8).copy(alpha = 0.25f),
                     radius = 58.dp.toPx(),
                     center = userScreen,
-                    style = Stroke(width = 1.2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f))
+                    style = Stroke(width = 1.2.dp.toPx(), pathEffect = dashEffectReticule)
                 )
             }
 
@@ -2708,20 +2737,19 @@ private fun InteractiveOfflineMapCanvas(
             val rightWingRad = Math.toRadians((userHeadingDegrees - 90f + 28f).toDouble())
             val wingLen = if (isDrivingWazeMode) 14.dp.toPx() else 12.dp.toPx()
 
-            val conePath = Path().apply {
-                moveTo(tipX, tipY)
-                lineTo(
-                    userScreen.x + (cos(leftWingRad) * wingLen).toFloat(),
-                    userScreen.y + (sin(leftWingRad) * wingLen).toFloat()
-                )
-                lineTo(
-                    userScreen.x + (cos(rightWingRad) * wingLen).toFloat(),
-                    userScreen.y + (sin(rightWingRad) * wingLen).toFloat()
-                )
-                close()
-            }
+            reusablePath.reset()
+            reusablePath.moveTo(tipX, tipY)
+            reusablePath.lineTo(
+                userScreen.x + (cos(leftWingRad) * wingLen).toFloat(),
+                userScreen.y + (sin(leftWingRad) * wingLen).toFloat()
+            )
+            reusablePath.lineTo(
+                userScreen.x + (cos(rightWingRad) * wingLen).toFloat(),
+                userScreen.y + (sin(rightWingRad) * wingLen).toFloat()
+            )
+            reusablePath.close()
             drawPath(
-                path = conePath,
+                path = reusablePath,
                 color = when {
                     isDrivingWazeMode -> Color(0xFFD8B4FE)
                     isLiveTracking -> Color(0xFF34D399)
@@ -2744,14 +2772,7 @@ private fun InteractiveOfflineMapCanvas(
                 center = userScreen
             )
 
-            val userStreetPaint = Paint().apply {
-                color = android.graphics.Color.argb(255, 254, 240, 138)
-                textSize = 12.sp.toPx()
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                textAlign = Paint.Align.CENTER
-                isAntiAlias = true
-                setShadowLayer(8f, 0f, 1.5f, android.graphics.Color.BLACK)
-            }
+            userStreetPaint.textSize = 12.sp.toPx()
             drawContext.canvas.nativeCanvas.drawText(
                 currentStreetAddress.take(36),
                 userScreen.x,
@@ -3389,20 +3410,33 @@ private suspend fun resolveStreetNameOfflineOrOnline(
     lon: Double
 ): String = withContext(Dispatchers.IO) {
     val gridKey = String.format(Locale.US, "%.4f,%.4f", lat, lon)
+    val memHit = streetNamesMemoryCache[gridKey]
+    if (!memHit.isNullOrBlank()) return@withContext memHit
+
     val cacheFile = File(context.filesDir, "street_names_cache.json")
 
-    val cachedJson = try {
-        if (cacheFile.exists()) JSONObject(cacheFile.readText()) else JSONObject()
-    } catch (_: Exception) {
-        JSONObject()
+    if (!streetNamesDiskLoaded) {
+        try {
+            if (cacheFile.exists()) {
+                val diskJson = JSONObject(cacheFile.readText())
+                val keys = diskJson.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = diskJson.optString(k, "")
+                    if (v.isNotBlank()) streetNamesMemoryCache[k] = v
+                }
+            }
+        } catch (_: Exception) {}
+        streetNamesDiskLoaded = true
+        val afterLoadHit = streetNamesMemoryCache[gridKey]
+        if (!afterLoadHit.isNullOrBlank()) return@withContext afterLoadHit
     }
-    val cachedName = cachedJson.optString(gridKey, "")
-    if (cachedName.isNotBlank()) return@withContext cachedName
 
     fun saveToCache(addressText: String) {
         try {
-            cachedJson.put(gridKey, addressText)
-            cacheFile.writeText(cachedJson.toString())
+            streetNamesMemoryCache[gridKey] = addressText
+            val jsonOut = JSONObject(streetNamesMemoryCache as Map<*, *>)
+            cacheFile.writeText(jsonOut.toString())
         } catch (_: Exception) {}
     }
 

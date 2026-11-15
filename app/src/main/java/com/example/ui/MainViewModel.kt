@@ -124,6 +124,10 @@ data class MainUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
+        const val CHAT_TAB_INDEX = 2
+        private const val USER_DATA_BACKUP_DEBOUNCE_MS = 2_500L
+        private const val MAP_BACKUP_IDLE_DEBOUNCE_MS = 60_000L
+
         /**
          * Converte Mês (1..12) e Ano (ex: 2027) para o timestamp do último dia daquele mês às 23:59:59.
          */
@@ -202,6 +206,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _backupStatusMessage = MutableStateFlow<String?>(null)
     private val _isBackupBusy = MutableStateFlow(false)
     private var autoBackupJob: Job? = null
+    private var pendingBackupIsMapOnly = false
+
+    // GPS consciente do ciclo de vida: pausa quando o app sai da tela e retoma ao voltar
+    private var liveTrackingPausedByBackground = false
+
+    // Memoização: evita recalcular FEFO/água a cada atualização de GPS (1x por segundo)
+    private var memoItemsRef: List<InventoryItemEntity>? = null
+    private var memoProfilesRef: List<FamilyProfileEntity>? = null
+    private var memoLocationFilter: StorageLocation? = null
+    private var memoCategoryFilter: ItemCategory? = null
+    private var memoDayKey: Long = -1L
+    private var memoFilteredItems: List<InventoryItemEntity> = emptyList()
+    private var memoEvaluated: List<RationingAndAlertEngine.ItemEvaluationResult> = emptyList()
+    private var memoWaterReport: RationingAndAlertEngine.WaterAutonomyReport? = null
 
     private val _manualChunks = _manualQuery.flatMapLatest { query ->
         repository.searchManual(query)
@@ -217,7 +235,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _familyDocuments.value = loadFamilyDocumentsFromDisk()
             val existingModelFile = pdfRagManager.findLocalModelFile()
             _hasSavedModelOnDisk.value = existingModelFile != null
-            if (existingModelFile != null) {
+            // Economia de bateria/RAM: o modelo de IA (vários GB) não é mais carregado em toda abertura do app.
+            // Ele é pré-carregado automaticamente assim que você abre a aba "Chat IA" (ou na 1ª pergunta).
+            if (existingModelFile != null && _selectedTab.value == CHAT_TAB_INDEX) {
                 loadSavedModelFromDisk()
             }
             refreshAvailableBackups()
@@ -257,13 +277,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Dispara um Auto-Backup em segundo plano (com debounce de 2.5s) sempre que o usuário
-     * cadastra, edita ou altera dados importantes, mantendo no máximo 3 arquivos na pasta pública.
+     * Dispara um Auto-Backup em segundo plano sempre que o usuário cadastra, edita ou altera dados
+     * importantes (debounce de 2.5s). O arquivo do dia é atualizado (1 backup por dia).
      */
     private fun scheduleAutoBackup() {
         autoBackupJob?.cancel()
+        pendingBackupIsMapOnly = false
         autoBackupJob = viewModelScope.launch {
-            delay(2500)
+            delay(USER_DATA_BACKUP_DEBOUNCE_MS)
             val res = backupManager.performRollingBackup(isAutoBackup = true)
             if (res.isSuccess) {
                 _availableBackups.value = backupManager.listAvailableBackups()
@@ -274,9 +295,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Agenda um Auto-Backup quando novos blocos de mapa da cidade são salvos no aparelho,
      * garantindo que o arquivo `.zip` em `Download/ResilienceHub_Backups/` contenha todo o mapa offline.
+     *
+     * Economia de bateria: enquanto você navega/arrasta o mapa, cada bloco novo apenas "adia" o backup;
+     * ele só é gerado 1 vez, 60s depois que os downloads de blocos param (em vez de recompactar
+     * o mapa inteiro a cada 2.5s). Se já houver um backup de dados agendado, ele é reaproveitado.
      */
     fun triggerAutoBackupAfterMapDownload() {
-        scheduleAutoBackup()
+        if (autoBackupJob?.isActive == true && !pendingBackupIsMapOnly) return
+        autoBackupJob?.cancel()
+        pendingBackupIsMapOnly = true
+        autoBackupJob = viewModelScope.launch {
+            delay(MAP_BACKUP_IDLE_DEBOUNCE_MS)
+            val res = backupManager.performRollingBackup(isAutoBackup = true)
+            if (res.isSuccess) {
+                _availableBackups.value = backupManager.listAvailableBackups()
+            }
+        }
     }
 
     fun refreshAvailableBackups() {
@@ -439,19 +473,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val hasSavedModelOnDisk = flowsArray[33] as Boolean
         val gpsFixCount = flowsArray[34] as Int
 
-        // Filtragem do estoque
-        val filteredItems = allItems.filter { item ->
-            (locationFilter == null || item.location == locationFilter) &&
-            (categoryFilter == null || item.category == categoryFilter)
+        // Filtragem do estoque + Avaliação FEFO + Relatório de Água:
+        // só recalcula quando o estoque, a família, os filtros ou o dia mudam (não a cada fix de GPS)
+        val dayKey = System.currentTimeMillis() / (60L * 60L * 1000L) // reavalia no máximo 1x por hora
+        if (allItems !== memoItemsRef || profiles !== memoProfilesRef ||
+            locationFilter != memoLocationFilter || categoryFilter != memoCategoryFilter ||
+            dayKey != memoDayKey || memoWaterReport == null
+        ) {
+            val filtered = allItems.filter { item ->
+                (locationFilter == null || item.location == locationFilter) &&
+                (categoryFilter == null || item.category == categoryFilter)
+            }
+            memoFilteredItems = filtered
+            memoEvaluated = filtered.map { item -> engine.evaluateItemStatus(item) }
+            memoWaterReport = engine.generateWaterReport(allItems, profiles)
+            memoItemsRef = allItems
+            memoProfilesRef = profiles
+            memoLocationFilter = locationFilter
+            memoCategoryFilter = categoryFilter
+            memoDayKey = dayKey
         }
-
-        // Avaliação FEFO e Manutenção de Bateria
-        val evaluated = filteredItems.map { item ->
-            engine.evaluateItemStatus(item)
-        }
-
-        // Relatório de Autonomia de Água
-        val waterReport = engine.generateWaterReport(allItems, profiles)
+        val filteredItems = memoFilteredItems
+        val evaluated = memoEvaluated
+        val waterReport = memoWaterReport
 
         // Navegação Matemática Offline via Haversine para todos os POIs
         val navList = pois.map { poi ->
@@ -511,6 +555,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSelectedTab(tab: Int) {
         _selectedTab.value = tab
+        // Pré-carrega o modelo de IA só quando o Chat é aberto (economiza bateria e RAM no resto do app)
+        if (tab == CHAT_TAB_INDEX &&
+            _hasSavedModelOnDisk.value &&
+            !_isModelLoaded.value &&
+            !_isModelInitializing.value
+        ) {
+            loadSavedModelFromDisk()
+        }
+    }
+
+    /**
+     * Chamado quando o app sai da tela (ON_STOP). Sem permissão de localização em segundo plano,
+     * o Android não entrega o GPS para o app escondido de qualquer forma; então desligamos o rádio
+     * GPS para não gastar bateria e religamos automaticamente ao voltar (ON_START).
+     * Lanterna SOS e Apito continuam funcionando normalmente em segundo plano.
+     */
+    fun onAppMovedToBackground() {
+        if (hardwareToolsManager.isLiveTracking.value) {
+            liveTrackingPausedByBackground = true
+            hardwareToolsManager.stopLiveLocationTracking()
+            _gpsProviderInfo.value = "RASTREIO EM PAUSA (app em segundo plano • economia de bateria)"
+        }
+    }
+
+    fun onAppMovedToForeground() {
+        if (liveTrackingPausedByBackground) {
+            liveTrackingPausedByBackground = false
+            val started = hardwareToolsManager.startLiveLocationTracking()
+            _gpsProviderInfo.value = if (started) {
+                "RASTREIO VIVO ATIVO • ACOMPANHANDO MOVIMENTO..."
+            } else {
+                "SEM PERMISSÃO DE LOCALIZAÇÃO PARA RASTREIO"
+            }
+        }
     }
 
     fun setLocationFilter(location: StorageLocation?) {
@@ -569,6 +647,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Alterna o Rastreio Vivo (movimentação em tempo real no mapa com trilha de deslocamento).
      */
     fun toggleLiveGpsTracking() {
+        liveTrackingPausedByBackground = false
         if (hardwareToolsManager.isLiveTracking.value) {
             hardwareToolsManager.stopLiveLocationTracking()
             _currentSpeedKmh.value = 0f

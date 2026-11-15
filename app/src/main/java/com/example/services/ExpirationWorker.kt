@@ -48,11 +48,12 @@ class ExpirationWorker(
             val constraints = Constraints.Builder()
                 .setRequiresCharging(false)
                 .setRequiresDeviceIdle(false)
+                .setRequiresBatteryNotLow(true) // Evita acordar a CPU em segundo plano quando a bateria está crítica
                 .build()
 
             val dailyRequest = PeriodicWorkRequestBuilder<ExpirationWorker>(
                 24, TimeUnit.HOURS,
-                1, TimeUnit.HOURS // janela de flexibilidade
+                3, TimeUnit.HOURS // Janela flexível p/ agrupar com janelas de manutenção Doze do Android
             )
                 .setConstraints(constraints)
                 .build()
@@ -83,7 +84,7 @@ class ExpirationWorker(
 
         return try {
             val database = AppDatabase.getInstance(context)
-            // Executa também a rotina diária de Auto-Backup com rotação de 3 arquivos (sem entupir o celular)
+            // Executa também a rotina diária de Auto-Backup (1 arquivo por dia; pulado se nada mudou)
             runCatching {
                 BackupManager(context, database).performRollingBackup(isAutoBackup = true)
             }

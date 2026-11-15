@@ -34,6 +34,16 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.onAppMovedToForeground()
+    }
+
+    override fun onStop() {
+        viewModel.onAppMovedToBackground()
+        super.onStop()
+    }
+
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
