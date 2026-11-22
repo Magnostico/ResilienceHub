@@ -510,6 +510,8 @@ fun OfflineMapScreen(
     var isPreloadingTiles by remember { mutableStateOf(false) }
     var preloadStatusText by remember { mutableStateOf<String?>(null) }
     var showConfirmClearPois by remember { mutableStateOf(false) }
+    var streetViewTarget by remember { mutableStateOf<Triple<String, Double, Double>?>(null) }
+    var showCloudOnlineModal by remember { mutableStateOf(false) }
 
     // Calcula em tempo real a orientação estilo Waze (manobra, corredor viário e ETA de carro)
     val drivingGuidance = remember(
@@ -893,6 +895,83 @@ fun OfflineMapScreen(
                                 }
                             }
                         }
+                        item {
+                            Surface(
+                                color = Color(0xFF1E293B),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, Color(0xFFF59E0B)),
+                                modifier = Modifier.clickable {
+                                    streetViewTarget = Triple(
+                                        currentStreetAddress.ifBlank { "Ponto no Mapa" },
+                                        mapCenterLat,
+                                        mapCenterLon
+                                    )
+                                }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Icon(Icons.Default.Streetview, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("📸 Street View", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFBBF24))
+                                }
+                            }
+                        }
+                        item {
+                            Surface(
+                                color = Color(0xFF1E293B),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                                modifier = Modifier.clickable {
+                                    viewModel.openFreeGoogleMaps(
+                                        lat = mapCenterLat,
+                                        lon = mapCenterLon,
+                                        label = currentStreetAddress.ifBlank { "Localização ResilienceHub" },
+                                        navigate = false
+                                    )
+                                }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Icon(Icons.Default.Map, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("🗺️ Google Maps", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
+                                }
+                            }
+                        }
+                        item {
+                            val onlineOn = state.apiCostGuard.onlineToolsEnabled
+                            Surface(
+                                color = if (onlineOn) Color(0xFF0C2434) else Color(0xFF1E293B),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, if (onlineOn) Color(0xFF38BDF8) else Color(0xFF64748B)),
+                                modifier = Modifier.clickable {
+                                    showCloudOnlineModal = true
+                                }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Icon(
+                                        if (onlineOn) Icons.Default.CloudDone else Icons.Default.CloudOff,
+                                        contentDescription = null,
+                                        tint = if (onlineOn) Color(0xFF38BDF8) else Color(0xFF94A3B8),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (onlineOn) "☁️ Online: ON" else "✈️ Offline-First",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (onlineOn) Color(0xFF38BDF8) else Color(0xFFCBD5E1)
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1148,6 +1227,12 @@ fun OfflineMapScreen(
                         mapCenterLon = state.currentLon
                         if (mapZoomFloat < 16.0f) mapZoomFloat = 16.5f
                     },
+                    onOpenStreetView = {
+                        val targetPoi = state.pois.find { it.id == nav.poiId }
+                        if (targetPoi != null) {
+                            streetViewTarget = Triple(targetPoi.title, targetPoi.latitude, targetPoi.longitude)
+                        }
+                    },
                     onDelete = { viewModel.deletePoi(nav.poiId) }
                 )
             }
@@ -1156,6 +1241,30 @@ fun OfflineMapScreen(
         item {
             Spacer(modifier = Modifier.height(76.dp))
         }
+    }
+
+    // =========================================================================
+    // MODAL DE STREET VIEW HÍBRIDO (CACHE OFFLINE + API ANTI-GASTO + 360° GRÁTIS)
+    // =========================================================================
+    streetViewTarget?.let { (svTitle, svLat, svLon) ->
+        StreetViewPreviewDialog(
+            title = svTitle,
+            lat = svLat,
+            lon = svLon,
+            apiCostGuard = viewModel.apiCostGuard,
+            onlineToolsEnabled = state.apiCostGuard.onlineToolsEnabled,
+            onDismiss = { streetViewTarget = null },
+            onOpenFree360 = { viewModel.openFreeStreetView360(svLat, svLon) },
+            onOpenFreeMapsRoute = { viewModel.openFreeGoogleMaps(svLat, svLon, svTitle, navigate = true) }
+        )
+    }
+
+    if (showCloudOnlineModal) {
+        CloudAndOnlineHubDialog(
+            state = state,
+            viewModel = viewModel,
+            onDismiss = { showCloudOnlineModal = false }
+        )
     }
 
     // =========================================================================
@@ -3654,6 +3763,7 @@ fun PoiOfflineCard(
     currentSpeedKmh: Float = 0f,
     onClick: () -> Unit,
     onStartWazeNavigation: (() -> Unit)? = null,
+    onOpenStreetView: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null
 ) {
     val isFamily = nav.poiType.contains("Famili", ignoreCase = true)
@@ -3785,18 +3895,36 @@ fun PoiOfflineCard(
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 if (onStartWazeNavigation != null) {
-                    Surface(
-                        color = if (isDrivingToThis) Color(0xFF059669) else Color(0xFF9333EA),
-                        shape = RoundedCornerShape(6.dp),
-                        modifier = Modifier.clickable { onStartWazeNavigation() }
-                    ) {
-                        Text(
-                            text = if (isDrivingToThis) "🚗 Navegando" else "🚗 Ir (Waze)",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                        )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (onOpenStreetView != null) {
+                            Surface(
+                                color = Color(0xFF1E293B),
+                                shape = RoundedCornerShape(6.dp),
+                                border = BorderStroke(1.dp, Color(0xFFF59E0B)),
+                                modifier = Modifier.clickable { onOpenStreetView() }
+                            ) {
+                                Text(
+                                    text = "📸 SV",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFFFBBF24),
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+                        Surface(
+                            color = if (isDrivingToThis) Color(0xFF059669) else Color(0xFF9333EA),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.clickable { onStartWazeNavigation() }
+                        ) {
+                            Text(
+                                text = if (isDrivingToThis) "🚗 Navegando" else "🚗 Ir (Waze)",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
                     }
                 } else if (nav.phone != null) {
                     Text(

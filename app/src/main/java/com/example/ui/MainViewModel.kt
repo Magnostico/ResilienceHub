@@ -15,8 +15,10 @@ import com.example.data.model.PoiType
 import com.example.data.model.StorageLocation
 import com.example.data.repository.ResilienceRepository
 import com.example.domain.RationingAndAlertEngine
+import com.example.services.ApiCostGuard
 import com.example.services.BackupManager
 import com.example.services.ExpirationWorker
+import com.example.services.FirebaseCloudSyncManager
 import com.example.services.HardwareToolsManager
 import com.example.services.PdfRagManager
 import kotlinx.coroutines.Dispatchers
@@ -118,7 +120,13 @@ data class MainUiState(
     // Backup & Restore states
     val availableBackups: List<BackupManager.BackupSnapshotInfo> = emptyList(),
     val backupStatusMessage: String? = null,
-    val isBackupBusy: Boolean = false
+    val isBackupBusy: Boolean = false,
+
+    // Online-Optional: Firebase Cloud Sync + Google Maps / Street View Cost Guard
+    val apiCostGuard: ApiCostGuard.Snapshot = ApiCostGuard.Snapshot(),
+    val cloudAuthState: FirebaseCloudSyncManager.CloudAuthState = FirebaseCloudSyncManager.CloudAuthState(),
+    val cloudSyncStatusMessage: String? = null,
+    val isCloudBusy: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -164,6 +172,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val hardwareToolsManager = HardwareToolsManager(application)
     val pdfRagManager = PdfRagManager(application, database)
     val backupManager = BackupManager(application, database)
+    val apiCostGuard = ApiCostGuard(application)
+    val cloudSyncManager = FirebaseCloudSyncManager(application, database, apiCostGuard)
 
     private val familyDocsDir = File(application.filesDir, "family_docs").apply {
         if (!exists()) mkdirs()
@@ -207,6 +217,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isBackupBusy = MutableStateFlow(false)
     private var autoBackupJob: Job? = null
     private var pendingBackupIsMapOnly = false
+
+    // Firebase Cloud Sync & Online APIs States (100% Offline-First por padrão)
+    private val _cloudAuthState = MutableStateFlow(cloudSyncManager.getCurrentAuthState())
+    private val _cloudSyncStatusMessage = MutableStateFlow<String?>(null)
+    private val _isCloudBusy = MutableStateFlow(false)
 
     // GPS consciente do ciclo de vida: pausa quando o app sai da tela e retoma ao voltar
     private var liveTrackingPausedByBackground = false
@@ -372,6 +387,94 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // =========================================================================
+    // ONLINE OPCIONAL: FIREBASE CLOUD SYNC & GOOGLE MAPS / STREET VIEW ANTI-GASTO
+    // =========================================================================
+
+    fun setOnlineToolsEnabled(enabled: Boolean) {
+        apiCostGuard.setOnlineToolsEnabled(enabled)
+        _cloudAuthState.value = cloudSyncManager.getCurrentAuthState()
+        _cloudSyncStatusMessage.value = if (enabled) {
+            "🌐 Ferramentas Online ativadas (com trava diária anti-gasto ativa)."
+        } else {
+            "✈️ Modo 100% Offline-First ativo (zero consumo de rede/APIs)."
+        }
+    }
+
+    fun updateApiDailyLimits(streetViewLimit: Int, cloudOpsLimit: Int) {
+        apiCostGuard.updateDailyLimits(streetViewLimit, cloudOpsLimit)
+        _cloudSyncStatusMessage.value = "🛡 Limites atualizados: máx. ${streetViewLimit.coerceIn(1, 30)} Street View/dia e ${cloudOpsLimit.coerceIn(6, 300)} ops Firebase/dia."
+    }
+
+    fun signInCloudAnonymously() {
+        viewModelScope.launch {
+            _isCloudBusy.value = true
+            _cloudSyncStatusMessage.value = "Conectando sessão rápida no Firebase..."
+            val res = cloudSyncManager.signInAnonymously()
+            _cloudAuthState.value = cloudSyncManager.getCurrentAuthState()
+            _cloudSyncStatusMessage.value = res.message
+            _isCloudBusy.value = false
+        }
+    }
+
+    fun signInCloudWithEmail(email: String, password: String) {
+        viewModelScope.launch {
+            _isCloudBusy.value = true
+            _cloudSyncStatusMessage.value = "Autenticando no Firebase..."
+            val res = cloudSyncManager.signInWithEmail(email, password)
+            _cloudAuthState.value = cloudSyncManager.getCurrentAuthState()
+            _cloudSyncStatusMessage.value = res.message
+            _isCloudBusy.value = false
+        }
+    }
+
+    fun registerCloudWithEmail(email: String, password: String) {
+        viewModelScope.launch {
+            _isCloudBusy.value = true
+            _cloudSyncStatusMessage.value = "Criando conta segura no Firebase..."
+            val res = cloudSyncManager.registerWithEmail(email, password)
+            _cloudAuthState.value = cloudSyncManager.getCurrentAuthState()
+            _cloudSyncStatusMessage.value = res.message
+            _isCloudBusy.value = false
+        }
+    }
+
+    fun signOutCloud() {
+        cloudSyncManager.signOut()
+        _cloudAuthState.value = cloudSyncManager.getCurrentAuthState()
+        _cloudSyncStatusMessage.value = "Desconectado da nuvem Firebase. Seus dados locais (offline) continuam intactos."
+    }
+
+    fun uploadVaultToFirebase() {
+        viewModelScope.launch {
+            _isCloudBusy.value = true
+            _cloudSyncStatusMessage.value = "Enviando Estoque, Família e Pins para o Firebase (apenas 3 escritas)..."
+            val res = cloudSyncManager.uploadVaultToCloud()
+            _cloudAuthState.value = cloudSyncManager.getCurrentAuthState()
+            _cloudSyncStatusMessage.value = res.message
+            _isCloudBusy.value = false
+        }
+    }
+
+    fun downloadVaultFromFirebase() {
+        viewModelScope.launch {
+            _isCloudBusy.value = true
+            _cloudSyncStatusMessage.value = "Baixando Estoque, Família e Pins do Firebase (apenas 3 leituras)..."
+            val res = cloudSyncManager.downloadVaultFromCloud()
+            _cloudAuthState.value = cloudSyncManager.getCurrentAuthState()
+            _cloudSyncStatusMessage.value = res.message
+            _isCloudBusy.value = false
+        }
+    }
+
+    fun openFreeStreetView360(lat: Double, lon: Double) {
+        apiCostGuard.openFreeGoogleStreetView360(lat, lon)
+    }
+
+    fun openFreeGoogleMaps(lat: Double, lon: Double, label: String, navigate: Boolean) {
+        apiCostGuard.openFreeGoogleMaps(lat, lon, label, navigate)
+    }
+
     private fun appendPointToTrail(lat: Double, lon: Double) {
         val currentList = _movementTrail.value
         val last = currentList.lastOrNull()
@@ -425,7 +528,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isModelInitializing,
             _loadedModelName,
             _hasSavedModelOnDisk,
-            _gpsFixCount
+            _gpsFixCount,
+            apiCostGuard.snapshot,
+            _cloudAuthState,
+            _cloudSyncStatusMessage,
+            _isCloudBusy
         )
     ) { flowsArray: Array<Any?> ->
         @Suppress("UNCHECKED_CAST")
@@ -472,6 +579,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val loadedModelName = flowsArray[32] as? String
         val hasSavedModelOnDisk = flowsArray[33] as Boolean
         val gpsFixCount = flowsArray[34] as Int
+        val apiCostGuardSnap = flowsArray[35] as ApiCostGuard.Snapshot
+        val cloudAuth = flowsArray[36] as FirebaseCloudSyncManager.CloudAuthState
+        val cloudSyncMsg = flowsArray[37] as? String
+        val isCloudBusy = flowsArray[38] as Boolean
 
         // Filtragem do estoque + Avaliação FEFO + Relatório de Água:
         // só recalcula quando o estoque, a família, os filtros ou o dia mudam (não a cada fix de GPS)
@@ -541,7 +652,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             hasSavedModelOnDisk = hasSavedModelOnDisk,
             availableBackups = availableBackups,
             backupStatusMessage = backupStatusMessage,
-            isBackupBusy = isBackupBusy
+            isBackupBusy = isBackupBusy,
+            apiCostGuard = apiCostGuardSnap,
+            cloudAuthState = cloudAuth,
+            cloudSyncStatusMessage = cloudSyncMsg,
+            isCloudBusy = isCloudBusy
         )
     }.stateIn(
         scope = viewModelScope,

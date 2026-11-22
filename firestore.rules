@@ -1,0 +1,175 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model — ResilienceHub (Spark Free-Tier Optimized)
+// ===============================================================
+//
+// This security rules file assumes a strictly bounded, cost-optimized
+// data architecture of at most 3 compact aggregate documents per
+// authenticated user (no parent users/{uid} document is required or
+// permitted, avoiding unnecessary Spark-tier reads/writes):
+//
+// Collection: users/{uid}/vault
+// Document ID: MUST be one of ['inventory', 'family', 'pois']
+//   - 'inventory' : Serialized JSON snapshot of Room InventoryItemEntity records
+//   - 'family'    : Serialized JSON snapshot of Room FamilyProfileEntity records (contains PII/medical data)
+//   - 'pois'      : Serialized JSON snapshot of Room MapPoiEntity records (contains home/meeting locations)
+//
+// Fields (strict schema — all 6 fields required, no extraneous fields allowed):
+//   - uid             : string (required, immutable, must equal path {uid} and request.auth.uid, length 1..128)
+//   - docType         : string (required, immutable, must equal {docId} in ['inventory', 'family', 'pois'])
+//   - payloadJson     : string (required, size() <= 500000 chars — ~500 KB cap against DoS/billing abuse)
+//   - itemCount       : int    (required, range 0..5000)
+//   - updatedAtMillis : int    (required, > 0; client epoch ms — offline-first sync & backup restore compatible)
+//   - schemaVersion   : int    (required, == 1)
+//
+// Access Pattern Assumptions:
+//   - Authentication: Firebase Auth (Anonymous and/or Email/Password).
+//   - Privacy / PII: Vault documents contain sensitive family/medical/location PII;
+//     access is strictly isolated to the owning authenticated user (request.auth.uid == uid).
+//   - Queries supported:
+//       * Single doc get:    users/{uid}/vault/{docId} (for docId in ['inventory', 'family', 'pois'])
+//       * Collection list:   users/{uid}/vault (returns at most the owner's 3 vault docs)
+//       * Create / Update:   Full set() or partial update() on valid docId with strict validator enforcement
+//       * Delete:            Owner deletion of valid docId
+//   - All other collections, subcollections, and parent paths (including users/{uid}) are denied by default.
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the caller is authenticated via Firebase Auth
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the authenticated caller owns the target user namespace
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if the authenticated caller owns the existing stored document
+    function isDocOwner() {
+      return isAuthenticated() &&
+             resource != null &&
+             'uid' in resource.data &&
+             resource.data.uid == request.auth.uid;
+    }
+
+    // Verify uid field is present and matches caller on create
+    function uidUnchanged() {
+      return 'uid' in request.resource.data &&
+             request.resource.data.uid == request.auth.uid;
+    }
+
+    // Verify uid field has not been modified on update
+    function uidNotModified() {
+      return 'uid' in request.resource.data &&
+             'uid' in resource.data &&
+             request.resource.data.uid == resource.data.uid;
+    }
+
+    // Validate that all required fields exist on the resulting document
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Validate that no extraneous/undefined fields exist on the resulting document
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Validate that immutable fields were not modified on update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Restrict vault document IDs strictly to the 3 compact aggregate documents
+    function isValidVaultDocId(docId) {
+      return docId in ['inventory', 'family', 'pois'];
+    }
+
+    // ===============================================================
+    // Domain Validators (MUST be called in both create and update)
+    // ===============================================================
+
+    function isValidVaultDocument(data, uid, docId) {
+      let allowedFields = [
+        'uid',
+        'docType',
+        'payloadJson',
+        'itemCount',
+        'updatedAtMillis',
+        'schemaVersion'
+      ];
+      return hasOnlyAllowedFields(allowedFields) &&
+             hasRequiredFields(allowedFields) &&
+             isValidVaultDocId(docId) &&
+             data.uid is string &&
+             data.uid == uid &&
+             data.uid == request.auth.uid &&
+             data.uid.size() > 0 &&
+             data.uid.size() <= 128 &&
+             data.docType is string &&
+             data.docType == docId &&
+             data.payloadJson is string &&
+             data.payloadJson.size() <= 500000 &&
+             data.itemCount is int &&
+             data.itemCount >= 0 &&
+             data.itemCount <= 5000 &&
+             data.updatedAtMillis is int &&
+             data.updatedAtMillis > 0 &&
+             data.schemaVersion is int &&
+             data.schemaVersion == 1;
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // Strictly scoped per-user vault (max 3 documents: inventory, family, pois)
+    match /users/{uid}/vault/{docId} {
+      // Allow single-document fetch only for the owner and a valid vault docId.
+      // Permits reading non-existent docs cleanly (resource == null) on initial sync.
+      allow get: if isOwner(uid) &&
+                    isValidVaultDocId(docId) &&
+                    (resource == null || isDocOwner());
+
+      // Allow listing the owner's own vault subcollection (at most 3 docs can exist).
+      // Intentionally omits docId wildcard predicate so collection("vault").get() succeeds.
+      allow list: if isOwner(uid);
+
+      // Allow creating one of the 3 vault documents with strict schema & ownership validation.
+      allow create: if isOwner(uid) &&
+                       isValidVaultDocId(docId) &&
+                       uidUnchanged() &&
+                       isValidVaultDocument(request.resource.data, uid, docId);
+
+      // Allow updating an existing vault document with full schema re-validation
+      // and strict immutability enforcement on uid and docType.
+      allow update: if isOwner(uid) &&
+                       isDocOwner() &&
+                       isValidVaultDocId(docId) &&
+                       uidNotModified() &&
+                       areImmutableFieldsUnchanged(['uid', 'docType']) &&
+                       isValidVaultDocument(request.resource.data, uid, docId);
+
+      // Allow owner to delete one of their 3 vault documents.
+      allow delete: if isOwner(uid) &&
+                       isValidVaultDocId(docId) &&
+                       (resource == null || isDocOwner());
+    }
+
+    // ===============================================================
+    // Default Deny — Block all other paths and operations
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

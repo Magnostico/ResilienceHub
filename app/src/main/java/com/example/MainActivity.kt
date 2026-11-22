@@ -57,6 +57,7 @@ class MainActivity : ComponentActivity() {
             var showAddManualDialog by remember { mutableStateOf(false) }
             var showConfirmClearAllApp by remember { mutableStateOf(false) }
             var showBackupRestoreDialog by remember { mutableStateOf(false) }
+            var showCloudOnlineHubDialog by remember { mutableStateOf(false) }
 
             val permissionsToRequest = remember {
                 val list = mutableListOf(
@@ -90,7 +91,9 @@ class MainActivity : ComponentActivity() {
                             isSosActive = state.isSosActive,
                             isWhistleActive = state.isWhistleActive,
                             isLiveTracking = state.isLiveTracking,
+                            isOnlineToolsEnabled = state.apiCostGuard.onlineToolsEnabled,
                             onToggleCrisisMode = { viewModel.toggleCrisisMode() },
+                            onOpenCloudHubDialog = { showCloudOnlineHubDialog = true },
                             onOpenBackupDialog = { showBackupRestoreDialog = true },
                             onRequestClearAllData = { showConfirmClearAllApp = true }
                         )
@@ -239,6 +242,14 @@ class MainActivity : ComponentActivity() {
                             onDismiss = { showBackupRestoreDialog = false }
                         )
                     }
+
+                    if (showCloudOnlineHubDialog) {
+                        CloudAndOnlineHubDialog(
+                            state = state,
+                            viewModel = viewModel,
+                            onDismiss = { showCloudOnlineHubDialog = false }
+                        )
+                    }
                 }
             }
         }
@@ -252,7 +263,9 @@ fun ResilienceTopBar(
     isSosActive: Boolean,
     isWhistleActive: Boolean,
     isLiveTracking: Boolean,
+    isOnlineToolsEnabled: Boolean,
     onToggleCrisisMode: () -> Unit,
+    onOpenCloudHubDialog: () -> Unit,
     onOpenBackupDialog: () -> Unit,
     onRequestClearAllData: () -> Unit
 ) {
@@ -308,19 +321,34 @@ fun ResilienceTopBar(
                     Box(
                         modifier = Modifier
                             .size(6.dp)
-                            .background(Color(0xFF34D399), CircleShape)
+                            .background(
+                                if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF34D399),
+                                CircleShape
+                            )
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "100% OFFLINE • PROTOCOLO FEFO",
+                        text = if (isOnlineToolsEnabled) "OFFLINE-FIRST + NUVEM" else "100% OFFLINE • FEFO",
                         fontSize = 9.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF34D399)
+                        color = if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF34D399)
                     )
                 }
             }
         },
         actions = {
+            // Botão global de Nuvem Firebase & APIs Online (Anti-Gasto)
+            IconButton(
+                onClick = onOpenCloudHubDialog,
+                modifier = Modifier.testTag("btn_open_cloud_hub_dialog")
+            ) {
+                Icon(
+                    if (isOnlineToolsEnabled) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                    contentDescription = "Nuvem Firebase e Ferramentas Online",
+                    tint = if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF94A3B8)
+                )
+            }
+
             // Botão global de Backup Automático & Restauração
             IconButton(
                 onClick = onOpenBackupDialog,
