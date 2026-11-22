@@ -43,6 +43,7 @@ class ApiCostGuard(private val context: Context) {
         private const val KEY_SV_LIMIT = "sv_daily_limit"
         private const val KEY_CLOUD_OPS = "cloud_ops_today"
         private const val KEY_CLOUD_LIMIT = "cloud_daily_limit"
+        private const val KEY_CUSTOM_MAPS_KEY = "custom_maps_api_key"
 
         const val DEFAULT_STREET_VIEW_DAILY_LIMIT = 10
         const val DEFAULT_CLOUD_OPS_DAILY_LIMIT = 60
@@ -90,12 +91,19 @@ class ApiCostGuard(private val context: Context) {
     }
 
     fun getMapsApiKey(): String {
+        val localSaved = prefs.getString(KEY_CUSTOM_MAPS_KEY, null)?.trim().orEmpty()
+        if (localSaved.isNotBlank()) return localSaved
         return try {
             val field = BuildConfig::class.java.getField("MAPS_API_KEY")
             (field.get(null) as? String)?.trim().orEmpty()
         } catch (_: Throwable) {
             ""
         }
+    }
+
+    fun setCustomMapsApiKey(apiKey: String) {
+        prefs.edit().putString(KEY_CUSTOM_MAPS_KEY, apiKey.trim()).apply()
+        refreshSnapshot()
     }
 
     private fun countCachedStreetViews(): Int {

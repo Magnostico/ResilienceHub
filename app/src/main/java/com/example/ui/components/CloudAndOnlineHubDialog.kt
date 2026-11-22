@@ -41,6 +41,7 @@ fun CloudAndOnlineHubDialog(
 
     var emailInput by remember { mutableStateOf("") }
     var passwordInput by remember { mutableStateOf("") }
+    var mapsKeyInput by remember { mutableStateOf(viewModel.apiCostGuard.getMapsApiKey()) }
 
     val textFieldColors = OutlinedTextFieldDefaults.colors(
         focusedTextColor = Color.White,
@@ -193,6 +194,43 @@ fun CloudAndOnlineHubDialog(
                                 ) {
                                     Text("+2", fontSize = 10.sp, color = Color.White)
                                 }
+                            }
+                        }
+
+                        // Chave Google Maps / Street View (salva apenas localmente no aparelho — nunca vai pro Git!)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = if (guard.hasMapsApiKey) {
+                                "🔑 Street View Embutido: CHAVE ATIVA"
+                            } else {
+                                "🔑 Chave Google Maps / Street View (opcional — salva só no celular):"
+                            },
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (guard.hasMapsApiKey) Color(0xFF34D399) else Color(0xFFCBD5E1)
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedTextField(
+                                value = mapsKeyInput,
+                                onValueChange = { mapsKeyInput = it },
+                                placeholder = { Text("Cole sua MAPS_API_KEY aqui", fontSize = 10.sp, color = Color(0xFF64748B)) },
+                                colors = textFieldColors,
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Button(
+                                onClick = { viewModel.saveCustomMapsApiKey(mapsKeyInput) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF090D16)
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                            ) {
+                                Text("Salvar", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
                             }
                         }
                     }

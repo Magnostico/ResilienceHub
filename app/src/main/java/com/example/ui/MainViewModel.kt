@@ -406,6 +406,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _cloudSyncStatusMessage.value = "🛡 Limites atualizados: máx. ${streetViewLimit.coerceIn(1, 30)} Street View/dia e ${cloudOpsLimit.coerceIn(6, 300)} ops Firebase/dia."
     }
 
+    fun saveCustomMapsApiKey(apiKey: String) {
+        apiCostGuard.setCustomMapsApiKey(apiKey)
+        _cloudSyncStatusMessage.value = if (apiKey.trim().isNotBlank()) {
+            "🔑 Chave Google Maps / Street View salva com segurança neste aparelho!"
+        } else {
+            "🔑 Chave local removida (modo 100% grátis via App Maps ativo)."
+        }
+    }
+
     fun signInCloudAnonymously() {
         viewModelScope.launch {
             _isCloudBusy.value = true
