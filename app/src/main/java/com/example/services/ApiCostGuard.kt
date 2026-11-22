@@ -91,7 +91,8 @@ class ApiCostGuard(private val context: Context) {
 
     fun getMapsApiKey(): String {
         return try {
-            BuildConfig.MAPS_API_KEY.trim()
+            val field = BuildConfig::class.java.getField("MAPS_API_KEY")
+            (field.get(null) as? String)?.trim().orEmpty()
         } catch (_: Throwable) {
             ""
         }
