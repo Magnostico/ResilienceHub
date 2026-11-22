@@ -78,6 +78,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.*
 
 private const val TILE_CACHE_DIR_NAME = "osm_tiles_v4"
+private const val SAT_TILE_CACHE_DIR_NAME = "sat_tiles_v1"
 private const val MAX_IN_MEMORY_TILES = 220
 private const val VALID_TILE_USER_AGENT =
     "ResilienceHubApp/2.0 (Android; https://github.com/Magnostico/ResilienceHub)"
@@ -488,6 +489,7 @@ fun OfflineMapScreen(
     var showBottomPoisInFullscreen by remember { mutableStateOf(true) }
     var autoFollowUser by remember { mutableStateOf(true) }
     var showStreetTiles by remember { mutableStateOf(true) }
+    var useSatelliteLayer by remember { mutableStateOf(false) }
     var isDrivingWazeMode by remember { mutableStateOf(false) }
     var currentStreetAddress by remember { mutableStateOf("Localizando rua/avenida...") }
 
@@ -830,144 +832,171 @@ fun OfflineMapScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Atalhos rápidos de Região & Cravar Pin Estratégico
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    // Grade fixa de 2 linhas (100% visível sem precisar rolar no Samsung Galaxy S25)
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        item {
+                        // Linha 1: Ações Offline (Pin, Baixar Rio, Del Castilho)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Surface(
                                 color = Color(0xFF1E293B),
                                 shape = RoundedCornerShape(8.dp),
                                 border = BorderStroke(1.dp, Color(0xFFFBBF24)),
-                                modifier = Modifier.clickable {
-                                    openPinDialogAt(mapCenterLat, mapCenterLon)
-                                }
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { openPinDialogAt(mapCenterLat, mapCenterLon) }
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)
                                 ) {
-                                    Icon(Icons.Default.PushPin, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("📌 Cravar Pin no Mapa", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFBBF24))
+                                    Icon(Icons.Default.PushPin, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(13.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("Cravar Pin", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFBBF24), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
-                        }
-                        item {
+
                             Surface(
                                 color = Color(0xFF0F2942),
                                 shape = RoundedCornerShape(8.dp),
                                 border = BorderStroke(1.dp, Color(0xFF38BDF8)),
-                                modifier = Modifier.clickable {
-                                    showOfflineDownloadModal = true
-                                }
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { showOfflineDownloadModal = true }
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)
                                 ) {
-                                    Icon(Icons.Default.DownloadForOffline, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("⬇ Salvar Cidade do Rio", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                                    Icon(Icons.Default.DownloadForOffline, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("Salvar Rio", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
-                        }
-                        item {
+
                             Surface(
                                 color = Color(0xFF1E293B),
                                 shape = RoundedCornerShape(8.dp),
                                 border = BorderStroke(1.dp, Color(0xFF34D399)),
-                                modifier = Modifier.clickable {
-                                    autoFollowUser = false
-                                    mapCenterLat = DEL_CASTILHO_LAT
-                                    mapCenterLon = DEL_CASTILHO_LON
-                                    mapZoomFloat = 16.0f
-                                }
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        autoFollowUser = false
+                                        mapCenterLat = DEL_CASTILHO_LAT
+                                        mapCenterLon = DEL_CASTILHO_LON
+                                        mapZoomFloat = 16.0f
+                                    }
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)
                                 ) {
-                                    Icon(Icons.Default.Place, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Ver Del Castilho", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF34D399))
+                                    Icon(Icons.Default.Place, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(13.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("Del Castilho", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF34D399), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
                         }
-                        item {
+
+                        // Linha 2: Ferramentas Visuais & Online (Street View, Google Maps, Satélite)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Surface(
-                                color = Color(0xFF1E293B),
+                                color = Color(0xFF2B1F06),
                                 shape = RoundedCornerShape(8.dp),
                                 border = BorderStroke(1.dp, Color(0xFFF59E0B)),
-                                modifier = Modifier.clickable {
-                                    streetViewTarget = Triple(
-                                        currentStreetAddress.ifBlank { "Ponto no Mapa" },
-                                        mapCenterLat,
-                                        mapCenterLon
-                                    )
-                                }
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        streetViewTarget = Triple(
+                                            currentStreetAddress.ifBlank { "Ponto no Mapa" },
+                                            mapCenterLat,
+                                            mapCenterLon
+                                        )
+                                    }
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)
                                 ) {
                                     Icon(Icons.Default.Streetview, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("📸 Street View", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFBBF24))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("Street View", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFBBF24), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
-                        }
-                        item {
+
                             Surface(
-                                color = Color(0xFF1E293B),
+                                color = Color(0xFF0C2434),
                                 shape = RoundedCornerShape(8.dp),
                                 border = BorderStroke(1.dp, Color(0xFF38BDF8)),
-                                modifier = Modifier.clickable {
-                                    viewModel.openFreeGoogleMaps(
-                                        lat = mapCenterLat,
-                                        lon = mapCenterLon,
-                                        label = currentStreetAddress.ifBlank { "Localização ResilienceHub" },
-                                        navigate = false
-                                    )
-                                }
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        viewModel.openFreeGoogleMaps(
+                                            lat = mapCenterLat,
+                                            lon = mapCenterLon,
+                                            label = currentStreetAddress.ifBlank { "Localização ResilienceHub" },
+                                            navigate = false
+                                        )
+                                    }
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)
                                 ) {
                                     Icon(Icons.Default.Map, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("🗺️ Google Maps", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("Google Maps", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFF38BDF8), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
-                        }
-                        item {
-                            val onlineOn = state.apiCostGuard.onlineToolsEnabled
+
                             Surface(
-                                color = if (onlineOn) Color(0xFF0C2434) else Color(0xFF1E293B),
+                                color = if (useSatelliteLayer) Color(0xFF064E3B) else Color(0xFF1E293B),
                                 shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(1.dp, if (onlineOn) Color(0xFF38BDF8) else Color(0xFF64748B)),
-                                modifier = Modifier.clickable {
-                                    showCloudOnlineModal = true
-                                }
+                                border = BorderStroke(1.dp, if (useSatelliteLayer) Color(0xFF34D399) else Color(0xFF64748B)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        useSatelliteLayer = !useSatelliteLayer
+                                        if (useSatelliteLayer) {
+                                            showStreetTiles = true
+                                            if (!state.apiCostGuard.onlineToolsEnabled) {
+                                                preloadStatusText = "🛰️ Satélite: ligue o Modo Online no topo p/ baixar novas fotos (já salvas abrem offline)"
+                                            }
+                                        }
+                                        tileRenderVersion++
+                                    }
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)
                                 ) {
                                     Icon(
-                                        if (onlineOn) Icons.Default.CloudDone else Icons.Default.CloudOff,
+                                        Icons.Default.Satellite,
                                         contentDescription = null,
-                                        tint = if (onlineOn) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                                        modifier = Modifier.size(14.dp)
+                                        tint = if (useSatelliteLayer) Color(0xFF34D399) else Color(0xFFE2E8F0),
+                                        modifier = Modifier.size(13.dp)
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
                                     Text(
-                                        text = if (onlineOn) "☁️ Online: ON" else "✈️ Offline-First",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (onlineOn) Color(0xFF38BDF8) else Color(0xFFCBD5E1)
+                                        text = if (useSatelliteLayer) "Satélite ON" else "Satélite",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (useSatelliteLayer) Color(0xFF34D399) else Color(0xFFE2E8F0),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
@@ -1057,6 +1086,7 @@ fun OfflineMapScreen(
                     mapZoomFloat = mapZoomFloat,
                     autoFollowUser = autoFollowUser,
                     showStreetTiles = showStreetTiles,
+                    useSatelliteLayer = useSatelliteLayer,
                     isDrivingWazeMode = isDrivingWazeMode,
                     drivingGuidance = drivingGuidance,
                     isFullscreen = false,
@@ -1102,9 +1132,27 @@ fun OfflineMapScreen(
                         mapCenterLon = state.currentLon
                         if (mapZoomFloat < 16.0f) mapZoomFloat = 16.5f
                     },
-                    onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
+                    onToggleStreetTiles = {
+                        if (!showStreetTiles) {
+                            showStreetTiles = true
+                            useSatelliteLayer = false
+                        } else if (!useSatelliteLayer) {
+                            useSatelliteLayer = true
+                        } else {
+                            showStreetTiles = false
+                            useSatelliteLayer = false
+                        }
+                        tileRenderVersion++
+                    },
                     onToggleFullscreen = { isMapFullscreen = true },
-                    onOpenOfflineDownloadModal = { showOfflineDownloadModal = true }
+                    onOpenOfflineDownloadModal = { showOfflineDownloadModal = true },
+                    onOpenStreetView = {
+                        streetViewTarget = Triple(
+                            currentStreetAddress.ifBlank { "Ponto no Mapa" },
+                            mapCenterLat,
+                            mapCenterLon
+                        )
+                    }
                 )
             }
         }
@@ -1357,6 +1405,7 @@ fun OfflineMapScreen(
                         mapZoomFloat = mapZoomFloat,
                         autoFollowUser = autoFollowUser,
                         showStreetTiles = showStreetTiles,
+                        useSatelliteLayer = useSatelliteLayer,
                         isDrivingWazeMode = isDrivingWazeMode,
                         drivingGuidance = drivingGuidance,
                         isFullscreen = true,
@@ -1402,9 +1451,27 @@ fun OfflineMapScreen(
                             mapCenterLon = state.currentLon
                             if (mapZoomFloat < 16.0f) mapZoomFloat = 16.8f
                         },
-                        onToggleStreetTiles = { showStreetTiles = !showStreetTiles },
+                        onToggleStreetTiles = {
+                            if (!showStreetTiles) {
+                                showStreetTiles = true
+                                useSatelliteLayer = false
+                            } else if (!useSatelliteLayer) {
+                                useSatelliteLayer = true
+                            } else {
+                                showStreetTiles = false
+                                useSatelliteLayer = false
+                            }
+                            tileRenderVersion++
+                        },
                         onToggleFullscreen = { isMapFullscreen = false },
-                        onOpenOfflineDownloadModal = { showOfflineDownloadModal = true }
+                        onOpenOfflineDownloadModal = { showOfflineDownloadModal = true },
+                        onOpenStreetView = {
+                            streetViewTarget = Triple(
+                                currentStreetAddress.ifBlank { "Ponto no Mapa" },
+                                mapCenterLat,
+                                mapCenterLon
+                            )
+                        }
                     )
 
                     // HUD Tático / Waze Superior em Tela Cheia
@@ -1857,6 +1924,7 @@ private fun MapViewportBox(
     mapZoomFloat: Float,
     autoFollowUser: Boolean,
     showStreetTiles: Boolean,
+    useSatelliteLayer: Boolean = false,
     isDrivingWazeMode: Boolean,
     drivingGuidance: DrivingManeuverGuidance?,
     isFullscreen: Boolean,
@@ -1879,7 +1947,8 @@ private fun MapViewportBox(
     onCenterUser: () -> Unit,
     onToggleStreetTiles: () -> Unit,
     onToggleFullscreen: () -> Unit,
-    onOpenOfflineDownloadModal: () -> Unit
+    onOpenOfflineDownloadModal: () -> Unit,
+    onOpenStreetView: () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -1903,6 +1972,8 @@ private fun MapViewportBox(
             focusedPoi = focusedPoiEntity,
             crisisMode = state.crisisMode,
             showStreetTiles = showStreetTiles,
+            useSatelliteLayer = useSatelliteLayer,
+            allowOnlineSatelliteFetch = state.apiCostGuard.onlineToolsEnabled,
             tileBitmapCache = tileBitmapCache,
             tileRenderVersion = tileRenderVersion,
             tileDownloadScope = tileDownloadScope,
@@ -1995,10 +2066,14 @@ private fun MapViewportBox(
                             modifier = Modifier.clickable { onToggleStreetTiles() }
                         ) {
                             Text(
-                                text = if (showStreetTiles) "Ruas HD" else "Só Vetor OLED",
+                                text = when {
+                                    !showStreetTiles -> "Só Vetor OLED"
+                                    useSatelliteLayer -> "🛰️ Satélite"
+                                    else -> "Ruas HD"
+                                },
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFF38BDF8),
+                                color = if (useSatelliteLayer && showStreetTiles) Color(0xFF34D399) else Color(0xFF38BDF8),
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             )
                         }
@@ -2089,6 +2164,12 @@ private fun MapViewportBox(
                 icon = Icons.Default.Remove,
                 contentDescription = "Menos Zoom",
                 onClick = { onZoomChange(mapZoomFloat - 0.85f) }
+            )
+            SmallFloatingButton(
+                icon = Icons.Default.Streetview,
+                contentDescription = "Abrir Street View neste Ponto",
+                tint = Color(0xFFFBBF24),
+                onClick = onOpenStreetView
             )
             SmallFloatingButton(
                 icon = Icons.Default.PushPin,
@@ -2211,6 +2292,8 @@ private fun InteractiveOfflineMapCanvas(
     focusedPoi: MapPoiEntity?,
     crisisMode: Boolean,
     showStreetTiles: Boolean,
+    useSatelliteLayer: Boolean = false,
+    allowOnlineSatelliteFetch: Boolean = false,
     tileBitmapCache: MutableMap<String, ImageBitmap>,
     tileRenderVersion: Int,
     tileDownloadScope: CoroutineScope,
@@ -2236,16 +2319,24 @@ private fun InteractiveOfflineMapCanvas(
     val currentCenterTileY = ((1.0 - ln(tan(centerLatRad) + 1.0 / cos(centerLatRad)) / PI) / 2.0 * n).toInt()
 
     // Dispara carregamento assíncrono em fila controlada quando a grade de tiles muda
-    LaunchedEffect(currentCenterTileX, currentCenterTileY, tileZoom, showStreetTiles) {
+    LaunchedEffect(currentCenterTileX, currentCenterTileY, tileZoom, showStreetTiles, useSatelliteLayer, allowOnlineSatelliteFetch) {
         if (!showStreetTiles) return@LaunchedEffect
         val maxTile = n.toInt() - 1
+        val keyPrefix = if (useSatelliteLayer) "sat/" else ""
 
         fun requestTileAsync(z: Int, tx: Int, ty: Int) {
-            val key = "$z/$tx/$ty"
+            val key = "$keyPrefix$z/$tx/$ty"
             if (tileBitmapCache.containsKey(key) || !inFlightTiles.add(key)) return
             tileDownloadScope.launch {
                 try {
-                    val res = loadOrDownloadTileWithStatus(context, z, tx, ty)
+                    val res = loadOrDownloadTileWithStatus(
+                        context = context,
+                        zoom = z,
+                        x = tx,
+                        y = ty,
+                        isSatellite = useSatelliteLayer,
+                        allowNetworkDownload = if (useSatelliteLayer) allowOnlineSatelliteFetch else true
+                    )
                     if (res != null) {
                         val (bmp, newlySaved) = res
                         withContext(Dispatchers.Main) {
@@ -2457,11 +2548,12 @@ private fun InteractiveOfflineMapCanvas(
 
         var loadedTilesInView = 0
 
-        // 1. Camada de Tiles OpenStreetMap com Fallback Hierárquico (Parent/Child Tile Scaling)
+        // 1. Camada de Tiles OpenStreetMap ou Satélite com Fallback Hierárquico (Parent/Child Tile Scaling)
         if (showStreetTiles) {
             val centerTileX = (centerWorldX / tileSizePx).toInt()
             val centerTileY = (centerWorldY / tileSizePx).toInt()
             val maxTile = n.toInt() - 1
+            val keyPrefix = if (useSatelliteLayer) "sat/" else ""
 
             for (dx in -2..2) {
                 for (dy in -2..2) {
@@ -2472,8 +2564,8 @@ private fun InteractiveOfflineMapCanvas(
                         val tileScreenY = (ty * tileSizePx - centerWorldY + h / 2.0).roundToInt()
                         val dstSizePx = IntSize(tileSizePx.roundToInt() + 2, tileSizePx.roundToInt() + 2)
 
-                        val key = "$tileZoom/$tx/$ty"
-                        val bmp = tileBitmapCache[key]
+                        val key = "$keyPrefix$tileZoom/$tx/$ty"
+                        val bmp = tileBitmapCache[key] ?: if (useSatelliteLayer) tileBitmapCache["$tileZoom/$tx/$ty"] else null
                         if (bmp != null) {
                             loadedTilesInView++
                             drawImage(
@@ -2491,7 +2583,8 @@ private fun InteractiveOfflineMapCanvas(
                                 if (parentZ < 9) break
                                 val parentTx = tx shr deltaZ
                                 val parentTy = ty shr deltaZ
-                                val parentBmp = tileBitmapCache["$parentZ/$parentTx/$parentTy"]
+                                val parentBmp = tileBitmapCache["$keyPrefix$parentZ/$parentTx/$parentTy"]
+                                    ?: if (useSatelliteLayer) tileBitmapCache["$parentZ/$parentTx/$parentTy"] else null
                                 if (parentBmp != null) {
                                     val subDiv = 1 shl deltaZ
                                     val subX = tx and (subDiv - 1)
@@ -2519,7 +2612,8 @@ private fun InteractiveOfflineMapCanvas(
                                 val halfSize = (tileSizePx / 2.0).roundToInt() + 2
                                 for (cx in 0..1) {
                                     for (cy in 0..1) {
-                                        val childBmp = tileBitmapCache["$childZ/${tx * 2 + cx}/${ty * 2 + cy}"]
+                                        val childBmp = tileBitmapCache["$keyPrefix$childZ/${tx * 2 + cx}/${ty * 2 + cy}"]
+                                            ?: if (useSatelliteLayer) tileBitmapCache["$childZ/${tx * 2 + cx}/${ty * 2 + cy}"] else null
                                         if (childBmp != null) {
                                             drawImage(
                                                 image = childBmp,
@@ -3462,10 +3556,14 @@ private fun loadOrDownloadTileWithStatus(
     context: Context,
     zoom: Int,
     x: Int,
-    y: Int
+    y: Int,
+    isSatellite: Boolean = false,
+    allowNetworkDownload: Boolean = true
 ): Pair<ImageBitmap, Boolean>? {
     return try {
-        val tileFile = File(context.filesDir, "$TILE_CACHE_DIR_NAME/$zoom/$x/$y.png")
+        val dirName = if (isSatellite) SAT_TILE_CACHE_DIR_NAME else TILE_CACHE_DIR_NAME
+        val ext = if (isSatellite) "jpg" else "png"
+        val tileFile = File(context.filesDir, "$dirName/$zoom/$x/$y.$ext")
         if (tileFile.exists() && tileFile.length() >= 60L &&
             tileFile.length() != 6725L && tileFile.length() != 6672L && tileFile.length() != 2049L
         ) {
@@ -3473,16 +3571,24 @@ private fun loadOrDownloadTileWithStatus(
             if (bmp != null) return Pair(bmp.asImageBitmap(), false)
         }
 
+        if (!allowNetworkDownload) return null
+
         tileFile.parentFile?.mkdirs()
 
-        val mirrorIndex = abs(x + y) % 4
-        val mirrors = listOf(
-            "https://tile.openstreetmap.org/$zoom/$x/$y.png",
-            "https://tile.openstreetmap.de/$zoom/$x/$y.png",
-            "https://a.tile.openstreetmap.fr/osmfr/$zoom/$x/$y.png",
-            "https://b.tile.openstreetmap.fr/osmfr/$zoom/$x/$y.png"
-        )
-        val orderedUrls = mirrors.drop(mirrorIndex) + mirrors.take(mirrorIndex)
+        val orderedUrls = if (isSatellite) {
+            listOf(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$zoom/$y/$x"
+            )
+        } else {
+            val mirrorIndex = abs(x + y) % 4
+            val mirrors = listOf(
+                "https://tile.openstreetmap.org/$zoom/$x/$y.png",
+                "https://tile.openstreetmap.de/$zoom/$x/$y.png",
+                "https://a.tile.openstreetmap.fr/osmfr/$zoom/$x/$y.png",
+                "https://b.tile.openstreetmap.fr/osmfr/$zoom/$x/$y.png"
+            )
+            mirrors.drop(mirrorIndex) + mirrors.take(mirrorIndex)
+        }
 
         for (urlStr in orderedUrls) {
             try {

@@ -9,8 +9,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -92,7 +95,9 @@ class MainActivity : ComponentActivity() {
                             isWhistleActive = state.isWhistleActive,
                             isLiveTracking = state.isLiveTracking,
                             isOnlineToolsEnabled = state.apiCostGuard.onlineToolsEnabled,
+                            isFirebaseSignedIn = state.cloudAuthState.isSignedIn,
                             onToggleCrisisMode = { viewModel.toggleCrisisMode() },
+                            onToggleOnlineTools = { viewModel.setOnlineToolsEnabled(it) },
                             onOpenCloudHubDialog = { showCloudOnlineHubDialog = true },
                             onOpenBackupDialog = { showBackupRestoreDialog = true },
                             onRequestClearAllData = { showConfirmClearAllApp = true }
@@ -264,159 +269,237 @@ fun ResilienceTopBar(
     isWhistleActive: Boolean,
     isLiveTracking: Boolean,
     isOnlineToolsEnabled: Boolean,
+    isFirebaseSignedIn: Boolean,
     onToggleCrisisMode: () -> Unit,
+    onToggleOnlineTools: (Boolean) -> Unit,
     onOpenCloudHubDialog: () -> Unit,
     onOpenBackupDialog: () -> Unit,
     onRequestClearAllData: () -> Unit
 ) {
-    TopAppBar(
-        title = {
-            Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+    Surface(
+        color = if (crisisMode) Color.Black else Color(0xFF111827),
+        shadowElevation = 4.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+        ) {
+            // LINHA 1: Marca + Backup + Limpar + Switch OLED (otimizada p/ 360dp Samsung Galaxy S25)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f).padding(end = 4.dp)
+                ) {
                     Icon(
                         Icons.Default.Shield,
                         contentDescription = null,
                         tint = Color(0xFFFBBF24),
-                        modifier = Modifier.size(19.dp)
+                        modifier = Modifier.size(18.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = "ResilienceHub",
                         fontWeight = FontWeight.Black,
-                        fontSize = 17.sp,
-                        color = Color.White
+                        fontSize = 16.sp,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
 
                     if (isSosActive || isWhistleActive) {
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Surface(
                             color = Color(0xFFDC2626),
                             shape = RoundedCornerShape(4.dp)
                         ) {
                             Text(
-                                text = "BEACON",
+                                text = "SOS",
                                 color = Color.White,
-                                fontSize = 9.sp,
+                                fontSize = 8.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                             )
                         }
                     } else if (isLiveTracking) {
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Surface(
                             color = Color(0xFF059669),
                             shape = RoundedCornerShape(4.dp)
                         ) {
                             Text(
-                                text = "GPS VIVO",
+                                text = "GPS",
                                 color = Color.White,
-                                fontSize = 9.sp,
+                                fontSize = 8.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                             )
                         }
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    IconButton(
+                        onClick = onOpenBackupDialog,
                         modifier = Modifier
-                            .size(6.dp)
+                            .size(34.dp)
+                            .testTag("btn_open_backup_dialog")
+                    ) {
+                        Icon(
+                            Icons.Default.Backup,
+                            contentDescription = "Backup e Restauração",
+                            tint = Color(0xFF34D399),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onRequestClearAllData,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .testTag("btn_clear_all_fictional_data")
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteSweep,
+                            contentDescription = "Apagar Dados Fictícios",
+                            tint = Color(0xFFF87171),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // Pill compacta MODO CRISE OLED
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
                             .background(
-                                if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF34D399),
-                                CircleShape
+                                if (crisisMode) Color(0xFF141414) else Color(0xFF1E293B),
+                                RoundedCornerShape(8.dp)
                             )
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = if (isOnlineToolsEnabled) "OFFLINE-FIRST + NUVEM" else "100% OFFLINE • FEFO",
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF34D399)
-                    )
+                            .border(
+                                1.dp,
+                                if (crisisMode) Color(0xFFFBBF24) else Color(0xFF334155),
+                                RoundedCornerShape(8.dp)
+                            )
+                            .clickable { onToggleCrisisMode() }
+                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                            .testTag("switch_crisis_mode")
+                    ) {
+                        Text(
+                            text = if (crisisMode) "OLED ON" else "OLED",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Black,
+                            color = if (crisisMode) Color(0xFFFBBF24) else Color(0xFFCBD5E1)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(
+                                    if (crisisMode) Color(0xFFFBBF24) else Color(0xFF475569),
+                                    CircleShape
+                                )
+                        )
+                    }
                 }
             }
-        },
-        actions = {
-            // Botão global de Nuvem Firebase & APIs Online (Anti-Gasto)
-            IconButton(
-                onClick = onOpenCloudHubDialog,
-                modifier = Modifier.testTag("btn_open_cloud_hub_dialog")
-            ) {
-                Icon(
-                    if (isOnlineToolsEnabled) Icons.Default.CloudDone else Icons.Default.CloudQueue,
-                    contentDescription = "Nuvem Firebase e Ferramentas Online",
-                    tint = if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF94A3B8)
-                )
-            }
 
-            // Botão global de Backup Automático & Restauração
-            IconButton(
-                onClick = onOpenBackupDialog,
-                modifier = Modifier.testTag("btn_open_backup_dialog")
-            ) {
-                Icon(
-                    Icons.Default.Backup,
-                    contentDescription = "Backup e Restauração",
-                    tint = Color(0xFF34D399)
-                )
-            }
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // Botão global para apagar todos os dados fictícios do app de uma só vez
-            IconButton(
-                onClick = onRequestClearAllData,
-                modifier = Modifier.testTag("btn_clear_all_fictional_data")
-            ) {
-                Icon(
-                    Icons.Default.DeleteSweep,
-                    contentDescription = "Apagar Dados Fictícios",
-                    tint = Color(0xFFF87171)
-                )
-            }
-
-            // Switch MODO CRISE OLED com alto contraste
+            // LINHA 2 (SEMPRE VISÍVEL EM TODAS AS TELAS): Interruptor Offline/Online + Botão Firebase & APIs
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .padding(end = 6.dp)
-                    .background(
-                        if (crisisMode) Color(0xFF141414) else Color(0xFF1E293B),
-                        RoundedCornerShape(8.dp)
-                    )
-                    .border(
-                        1.dp,
-                        if (crisisMode) Color(0xFFFBBF24) else Color(0xFF334155),
-                        RoundedCornerShape(8.dp)
-                    )
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        text = "CRISE OLED",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Black,
-                        color = if (crisisMode) Color(0xFFFBBF24) else Color.White
-                    )
-                    Text(
-                        text = if (crisisMode) "#000000 ATIVO" else "TÁTICO ESCURO",
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (crisisMode) Color(0xFF34D399) else Color(0xFFCBD5E1)
-                    )
-                }
-                Spacer(modifier = Modifier.width(6.dp))
-                Switch(
-                    checked = crisisMode,
-                    onCheckedChange = { onToggleCrisisMode() },
+                Surface(
+                    color = if (isOnlineToolsEnabled) Color(0xFF0C2434) else Color(0xFF091B18),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF10B981)
+                    ),
                     modifier = Modifier
-                        .scale(0.85f)
-                        .testTag("switch_crisis_mode")
-                )
+                        .weight(1f)
+                        .clickable { onToggleOnlineTools(!isOnlineToolsEnabled) }
+                        .testTag("btn_toggle_online_mode_topbar")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .background(
+                                        if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF34D399),
+                                        CircleShape
+                                    )
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isOnlineToolsEnabled) {
+                                    "🌐 ONLINE ATIVO (Toque p/ Offline)"
+                                } else {
+                                    "✈️ 100% OFFLINE (Toque p/ Online)"
+                                },
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (isOnlineToolsEnabled) Color(0xFF38BDF8) else Color(0xFF34D399),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                Surface(
+                    color = if (isFirebaseSignedIn) Color(0xFF0F2942) else Color(0xFF1E293B),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (isFirebaseSignedIn) Color(0xFF38BDF8) else Color(0xFFF59E0B)
+                    ),
+                    modifier = Modifier
+                        .clickable { onOpenCloudHubDialog() }
+                        .testTag("btn_open_cloud_hub_dialog")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                    ) {
+                        Icon(
+                            if (isFirebaseSignedIn) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                            contentDescription = "Nuvem Firebase e APIs",
+                            tint = if (isFirebaseSignedIn) Color(0xFF38BDF8) else Color(0xFFFBBF24),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isFirebaseSignedIn) "Firebase ✓" else "Firebase & APIs",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
+                }
             }
-        },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = if (crisisMode) Color.Black else Color(0xFF111827)
-        )
-    )
+        }
+    }
 }
 
 private fun Modifier.scale(scale: Float): Modifier = this.then(
@@ -446,7 +529,7 @@ fun ResilienceBottomBar(
             selected = selectedTab == 0,
             onClick = { onTabSelected(0) },
             icon = { Icon(Icons.Default.Inventory2, contentDescription = "Estoque") },
-            label = { Text("Estoque", fontSize = 11.sp, fontWeight = if (selectedTab == 0) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            label = { Text("Estoque", fontSize = 10.sp, maxLines = 1, softWrap = false, fontWeight = if (selectedTab == 0) FontWeight.ExtraBold else FontWeight.SemiBold) },
             colors = itemColors,
             modifier = Modifier.testTag("tab_inventory")
         )
@@ -454,7 +537,7 @@ fun ResilienceBottomBar(
             selected = selectedTab == 1,
             onClick = { onTabSelected(1) },
             icon = { Icon(Icons.Default.Explore, contentDescription = "Mapas") },
-            label = { Text("Mapas", fontSize = 11.sp, fontWeight = if (selectedTab == 1) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            label = { Text("Mapas", fontSize = 10.sp, maxLines = 1, softWrap = false, fontWeight = if (selectedTab == 1) FontWeight.ExtraBold else FontWeight.SemiBold) },
             colors = itemColors,
             modifier = Modifier.testTag("tab_maps")
         )
@@ -462,7 +545,7 @@ fun ResilienceBottomBar(
             selected = selectedTab == 2,
             onClick = { onTabSelected(2) },
             icon = { Icon(Icons.Default.Forum, contentDescription = "Chat IA") },
-            label = { Text("Chat IA", fontSize = 11.sp, fontWeight = if (selectedTab == 2) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            label = { Text("Chat IA", fontSize = 10.sp, maxLines = 1, softWrap = false, fontWeight = if (selectedTab == 2) FontWeight.ExtraBold else FontWeight.SemiBold) },
             colors = itemColors,
             modifier = Modifier.testTag("tab_manuals")
         )
@@ -470,7 +553,7 @@ fun ResilienceBottomBar(
             selected = selectedTab == 3,
             onClick = { onTabSelected(3) },
             icon = { Icon(Icons.Default.FlashOn, contentDescription = "Ferramentas") },
-            label = { Text("Ferramentas", fontSize = 11.sp, fontWeight = if (selectedTab == 3) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            label = { Text("Ferram.", fontSize = 10.sp, maxLines = 1, softWrap = false, fontWeight = if (selectedTab == 3) FontWeight.ExtraBold else FontWeight.SemiBold) },
             colors = itemColors,
             modifier = Modifier.testTag("tab_tools")
         )
@@ -478,7 +561,7 @@ fun ResilienceBottomBar(
             selected = selectedTab == 4,
             onClick = { onTabSelected(4) },
             icon = { Icon(Icons.Default.Shield, contentDescription = "Família") },
-            label = { Text("Família", fontSize = 11.sp, fontWeight = if (selectedTab == 4) FontWeight.ExtraBold else FontWeight.SemiBold) },
+            label = { Text("Família", fontSize = 10.sp, maxLines = 1, softWrap = false, fontWeight = if (selectedTab == 4) FontWeight.ExtraBold else FontWeight.SemiBold) },
             colors = itemColors,
             modifier = Modifier.testTag("tab_family")
         )
